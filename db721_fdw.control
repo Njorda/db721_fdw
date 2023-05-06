@@ -1,0 +1,5 @@
+comment = 'db721_fdw:  Created by pgrx'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/db721_fdw'
+relocatable = false
+superuser = true
