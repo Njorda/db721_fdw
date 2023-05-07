@@ -6,15 +6,6 @@ This repo will describe how to build a forigen data wrapper in rust using [pgxr]
 
 Postgres exposeses a standard way to interact with forgein data sources such as Parquet, Orc or any external data source of interest. This is done through what is called [hooks](https://github.com/taminomara/psql-hooks). In short hooks allow any one to extend the functionality through adding functional code at runtime. Hooks are a pointer to a function of a specific type, which is initially set to null. The documentation on FDW can be found [here](https://www.postgresql.org/docs/current/postgres-fdw.html). 
 
-When building a forigen data wrapper there are multiple hooks that could be utalised but at least three that have to be used. 
-
-```mermaid
-graph TD;
-    A-->B;
-    A-->C;
-    B-->D;
-    C-->D;
-```
 
 
 # How to run it
@@ -55,7 +46,9 @@ Is used to pass information between the different executions steps. This is wher
 
 # Resources
 
-[Good read](https://www.dolthub.com/blog/2022-01-26-creating-a-postgres-foreign-data-wrapper/)
+[Really good blog post that heavily inspired this one, FDW using c](https://www.dolthub.com/blog/2022-01-26-creating-a-postgres-foreign-data-wrapper/)
+[Postgres docs, great to add but not enough on its own for me](https://www.postgresql.org/docs/9.2/fdw-callbacks.html)
+[Superbase wrappers, great to have a implementation to compare with and see the correct pgxr syntax](https://github.com/supabase/wrappers)
 
 
 # How does it really work. 
@@ -95,4 +88,19 @@ The planing phase consists of GetForeignRelSize, GetForeignPaths and GetForeignP
 
 ### Begin, Iterate, End
 
+When a plan is created the next step is to execute on the plan, this happens in three
+- [BeginForeignScan](https://www.postgresql.org/docs/9.2/fdw-callbacks.html) should do any initialization that is needed before the scan. Information from the planing state can be accessed through `ForeignScanState` and the underlying `ForeignScan` which contains `fdw_private` which is provided through the previous planing and specifically `GetForeignPlan`. To pass information further the `fdw_state` on the `ForeignScanState` and `fdw_state` can be used. 
+- [IterateForeignScan](https://www.postgresql.org/docs/9.2/fdw-callbacks.html) should fetch one row(only), if all data is returned NULL should be returned marking the end. `ScanTupleSlot` should be used for the data return. Either a physical or virtual tuple should be returned. The rows returned must match the table definition of the FDW table. If projection pushdown is used these values should be set to NULL. 
+-[EndForeignScan](https://www.postgresql.org/docs/9.2/fdw-callbacks.html)
+
+# Current work
+
+Pass on the options that we can set. 
+
+### FDW options
+
+When creating a FDW table there is a possibility to add [some options](https://www.postgresql.org/docs/current/postgres-fdw.html#id-1.11.7.47.11).
+
+
+### How to set up a profile and make sure the grading works. 
 

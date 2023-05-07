@@ -75,7 +75,8 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
     (*baserel).rows = 10.0;
     (*baserel).fdw_private = std::ptr::null_mut();
 
-    let mut state = FdwState::new();
+    // Allocate a box with the memory, zero initiallize it now. 
+    let mut state = pgrx::PgBox::<FdwState>::alloc0();
     
     let conds = PgList::<pg_sys::RestrictInfo>::from_pg((*baserel).baserestrictinfo);
     for cond in conds.iter_ptr() {
@@ -106,8 +107,8 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         );
     }
     state.opts = ret; 
-    // Continue here 
-    (*baserel).fdw_private = PgBox::<FdwState, AllocatedByPostgres>::PgBox::from_pg(state).as_ptr();
+    // Continue here , maybe as _ is enough ... 
+    (*baserel).fdw_private = state.into_pg() as *mut std::ffi::c_void;
 
 }
 
@@ -233,9 +234,13 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     }
 
     // Continue here as well! 
-    let state = PgBox::<FdwState, AllocatedByPostgres>::PgBox::from_pg((*baserel).fdw_private as _);
-    let mut state = FdwState::deserialize_from_list((*plan).fdw_private as _);
+    // let state = PgBox::<FdwState, AllocatedByPostgres>::PgBox::from_pg((*baserel).fdw_private as _);
 
+    // this one is null heeeeereeee that is an issue for sure. 
+    //let mut state: PgBox<FdwState> = PgBox::<FdwState>::from_pg((*node).fdw_state as _);
+    // let mut state = FdwState::deserialize_from_list((*plan).fdw_private as _);
+
+    let mut state = pgrx::PgBox::<FdwState>::alloc0();
     state.rownum = 0;
     // Here we add a duckdb query instead ... 
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
@@ -247,7 +252,7 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
 ) -> *mut pg_sys::TupleTableSlot {
     log!("stuff");
     let slot = (*node).ss.ss_ScanTupleSlot;
-    let state = (*node).fdw_state as *mut HelloFdwState;
+    let state = (*node).fdw_state as *mut FdwState;
     // when this happens we will not load more data, we return one or multiple rows here as I understand
     // we want to limit how often we read the file so his will be relevant. 
     if (*state).rownum > 10 { // https://www.highgo.ca/2021/09/03/implement-foreign-scan-with-fdw-interface-api/
@@ -282,7 +287,7 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
 unsafe extern "C" fn hello_re_scan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
     debug1!("HelloFdw: hello_re_scan_foreign_scan");
 
-    let state = (*node).fdw_state as *mut HelloFdwState;
+    let state = (*node).fdw_state as *mut FdwState;
     (*state).rownum = 0;
 }
 
