@@ -3,7 +3,12 @@ use std::os::raw::c_int;
 use std::collections::HashMap;
 use std::ffi::CStr;
 
+use crate::parser::db721::read_metadata;
+
+pub mod parser;
+
 pg_module_magic!();
+
 
 pub struct FdwState {
     rownum: usize,
@@ -77,7 +82,7 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
 
     // Allocate a box with the memory, zero initiallize it now. 
     let mut state = pgrx::PgBox::<FdwState>::alloc0();
-    
+
     let conds = PgList::<pg_sys::RestrictInfo>::from_pg((*baserel).baserestrictinfo);
     for cond in conds.iter_ptr() {
         let expr = (*cond).clause as *mut pg_sys::Node;
@@ -106,9 +111,23 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
             value.to_str().unwrap().to_owned(),
         );
     }
+    for (key, val) in ret.iter() {
+        log!("The key is:{} and the value is: {}", key, val);
+    }
+    if ret.contains_key("filename"){
+        let Some(filename) = ret.get("filename") else {todo!()};
+        let meta = read_metadata(filename.to_string());
+        log!("{}", meta.max_values_per_block);
+        log!("Success");
+    }
+
+
     state.opts = ret; 
+    
     // Continue here , maybe as _ is enough ... 
     (*baserel).fdw_private = state.into_pg() as *mut std::ffi::c_void;
+
+    // Print all the options here and if they are expected and so on. 
 
 }
 
@@ -227,7 +246,7 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     node: *mut pg_sys::ForeignScanState,
     eflags: ::std::os::raw::c_int,
 ) {
-    debug1!("HelloFdw: hello_begin_foreign_scan");
+    log!("HelloFdw: hello_begin_foreign_scan");
 
     if eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as i32 != 0 {
         return;
@@ -250,7 +269,7 @@ unsafe extern "C" fn hello_begin_foreign_scan(
 unsafe extern "C" fn hello_iterate_foreign_scan(
     node: *mut pg_sys::ForeignScanState,
 ) -> *mut pg_sys::TupleTableSlot {
-    log!("stuff");
+    log!("stuff two");
     let slot = (*node).ss.ss_ScanTupleSlot;
     let state = (*node).fdw_state as *mut FdwState;
     // when this happens we will not load more data, we return one or multiple rows here as I understand

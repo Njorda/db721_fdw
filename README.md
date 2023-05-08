@@ -104,3 +104,6 @@ When creating a FDW table there is a possibility to add [some options](https://w
 
 ### How to set up a profile and make sure the grading works. 
 
+## Tricks
+- export CARGO_NET_GIT_FETCH_WITH_CLI=true
+- export PGRX_BUILD_VERBOSE=true
