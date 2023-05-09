@@ -83,7 +83,7 @@ the next part of the implmentation will be broken up based upon the [path of a q
 
 The planing phase consists of GetForeignRelSize, GetForeignPaths and GetForeignPlan and is executed in that order. The purpose of each step is the following: 
  - [GetForeignRelSize](https://www.postgresql.org/docs/9.2/fdw-callbacks.html) should update the baserel rows and potentially also width. This will later be used by the optimizer. If not the correct values are set it could lead to potential miss optimization. This is also the place where we will handle the [FDW options](https://www.postgresql.org/docs/current/postgres-fdw.html#id-1.11.7.47.11). In order to send information to the next step of the planing we will store the information inside `ForeignScan node` using the `void *fdw_private` that is provided by postgres. `fdw_private` will not be touched by anything else and is it is free to store anything of interest within it. 
- - GetForeignPaths](https://www.postgresql.org/docs/9.2/fdw-callbacks.html) describes the paths to access the data. In our case there will only be one. Each paths should include a cost estimate. This will be used by the optimizer to find the optimal path. This is set on the `baserel->pathlist`.
+ - [GetForeignPaths](https://www.postgresql.org/docs/9.2/fdw-callbacks.html) describes the paths to access the data. In our case there will only be one. Each paths should include a cost estimate. This will be used by the optimizer to find the optimal path. This is set on the `baserel->pathlist`.
  - [GetForeignPlan](https://www.postgresql.org/docs/9.2/fdw-callbacks.html) ir responsible for creating a `ForeignScan *` for the given `ForeignPath *`. As input the optimizer has selected the best access path(in our case there will only be one). Here we will also be able to pass information on to the next group of steps of the processing, [Begin, Iterate, End](# Begin, Iterate, End) where we will execute the plan, using the `void *fdw_state`. However `void *fdw_state` is a list so if the information from `void *fdw_private` should be propagate id needs to be reformated.
 
 ### Begin, Iterate, End
@@ -107,3 +107,14 @@ When creating a FDW table there is a possibility to add [some options](https://w
 ## Tricks
 - export CARGO_NET_GIT_FETCH_WITH_CLI=true
 - export PGRX_BUILD_VERBOSE=true
+
+
+# Author
+
+Dreaming about becoming a database hacker, one commit a time. 
+
+# Project
+- Duckdb vector seach 
+- Array compression will matter when it comes to read from disc
+- How do I make it concurrent
+- I need to learn how to writt c++ it seems like

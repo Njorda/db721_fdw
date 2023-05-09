@@ -3,7 +3,7 @@ use std::os::raw::c_int;
 use std::collections::HashMap;
 use std::ffi::CStr;
 
-use crate::parser::db721::read_metadata;
+use crate::parser::db721::{read_metadata, Metadata};
 
 pub mod parser;
 
@@ -13,11 +13,12 @@ pg_module_magic!();
 pub struct FdwState {
     rownum: usize,
     opts: HashMap<String, String>,
+    metadata: Option<Metadata>, 
 }
 
 impl FdwState {
     pub fn new() -> Self {
-        Self { rownum: 0 , opts: HashMap::new()}
+        Self { rownum: 0 , opts: HashMap::new(), metadata: None}
     }
 }
 
@@ -111,17 +112,12 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
             value.to_str().unwrap().to_owned(),
         );
     }
-    for (key, val) in ret.iter() {
-        log!("The key is:{} and the value is: {}", key, val);
-    }
+
     if ret.contains_key("filename"){
         let Some(filename) = ret.get("filename") else {todo!()};
-        let meta = read_metadata(filename.to_string());
-        log!("{}", meta.max_values_per_block);
-        log!("Success");
+        state.metadata = Some(read_metadata(filename.to_string()));
+        log!("Metadata is set");
     }
-
-
     state.opts = ret; 
     
     // Continue here , maybe as _ is enough ... 
@@ -209,20 +205,36 @@ unsafe extern "C" fn hello_get_foreign_plan(
     _root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     _foreigntableid: pg_sys::Oid,
-    best_path: *mut pg_sys::ForeignPath,
+    _best_path: *mut pg_sys::ForeignPath,
     tlist: *mut pg_sys::List,
     mut scan_clauses: *mut pg_sys::List,
     outer_plan: *mut pg_sys::Plan,
 ) -> *mut pg_sys::ForeignScan {
     debug1!("HelloFdw: hello_get_foreign_plan");
 
+    let state = PgBox::<FdwState>::from_pg((*baserel).fdw_private as _);
+
     scan_clauses = pg_sys::extract_actual_clauses(scan_clauses, false);
+
+    let mut ret = PgList::new();
+    let val = state.into_pg() as i64;
+    let cst = pg_sys::makeConst(
+        pg_sys::INT8OID,
+        -1,
+        pg_sys::InvalidOid,
+        8,
+        val.into_datum().unwrap(),
+        false,
+        true,
+    );
+    ret.push(cst);
+
     pg_sys::make_foreignscan(
         tlist,
         scan_clauses,
         (*baserel).relid,
         std::ptr::null_mut(),
-        (*best_path).fdw_private,
+        ret.into_pg(),         
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         outer_plan,
@@ -252,6 +264,14 @@ unsafe extern "C" fn hello_begin_foreign_scan(
         return;
     }
 
+    let scan_state = (*node).ss;
+
+    let plan = scan_state.ps.plan as *mut pg_sys::ForeignScan;
+    let list = PgList::<pg_sys::Const>::from_pg((*plan).fdw_private );
+    let cst = list.head().unwrap();
+    let ptr = i64::from_datum((*cst).constvalue, (*cst).constisnull).unwrap();
+    let mut state:PgBox::<FdwState> = PgBox::from_pg(ptr as _);
+
     // Continue here as well! 
     // let state = PgBox::<FdwState, AllocatedByPostgres>::PgBox::from_pg((*baserel).fdw_private as _);
 
@@ -259,7 +279,9 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     //let mut state: PgBox<FdwState> = PgBox::<FdwState>::from_pg((*node).fdw_state as _);
     // let mut state = FdwState::deserialize_from_list((*plan).fdw_private as _);
 
-    let mut state = pgrx::PgBox::<FdwState>::alloc0();
+    // This is the next step to do tomorrow, we should get this from the plan that was made
+    // But we need to figure out how we store this correctly. 
+    // let mut state: PgBox<FdwState, AllocatedByRust> = pgrx::PgBox::<FdwState>::alloc0();
     state.rownum = 0;
     // Here we add a duckdb query instead ... 
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
@@ -273,7 +295,8 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     let slot = (*node).ss.ss_ScanTupleSlot;
     let state = (*node).fdw_state as *mut FdwState;
     // when this happens we will not load more data, we return one or multiple rows here as I understand
-    // we want to limit how often we read the file so his will be relevant. 
+    // we want to limit how often we read the file so his will be relevant.
+    log!("Inside the itter stuff now:{}", (*state)); 
     if (*state).rownum > 10 { // https://www.highgo.ca/2021/09/03/implement-foreign-scan-with-fdw-interface-api/
         (*(*slot).tts_ops).clear.expect("missing")(slot);
         return slot;
