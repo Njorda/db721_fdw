@@ -118,3 +118,4 @@ Dreaming about becoming a database hacker, one commit a time.
 - Array compression will matter when it comes to read from disc
 - How do I make it concurrent
 - I need to learn how to writt c++ it seems like
+- Lets do annoy and knn here, should be aweeeesooome

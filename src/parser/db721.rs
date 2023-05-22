@@ -1,5 +1,7 @@
 use std::{fs::File, io::{Read, Seek, SeekFrom}, any::Any};
 use std::collections::{HashMap, HashSet};
+use pgrx::pg_sys::{self, Datum, Oid};
+use pgrx::*;
 use serde::{Deserialize, Serialize};
 use byteorder::{ByteOrder, LittleEndian};
 use serde_json::{Value, Map, Number}; //https://stackoverflow.com/questions/39146584/how-do-i-create-a-rust-hashmap-where-the-value-can-be-one-of-multiple-types
@@ -25,7 +27,7 @@ pub struct Columns{
 
 /// a struct into which to decode the thing
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Metadata {
+pub struct db721_Metadata {
     #[serde(rename = "Table")]
     pub table: String,
 
@@ -34,8 +36,20 @@ pub struct Metadata {
 
     #[serde(rename = "Columns")]
     pub columns: HashMap<String, Columns>,
+
     // add the other fields if you need them
 }
+
+pub struct Metadata{
+    pub table: String,
+
+    pub max_values_per_block: i32,
+
+    pub columns: HashMap<String, Columns>,
+
+    pub start_metadata: i32
+}
+
 //"/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721"
 pub fn read_metadata(filename: String)-> Metadata {
     let mut f = File::open(filename).unwrap();
@@ -49,17 +63,21 @@ pub fn read_metadata(filename: String)-> Metadata {
     f.seek(SeekFrom::End(-i64::from(out)-4)).unwrap();
     let mut buffer = vec![0u8; out.try_into().unwrap()];
     f.read_exact(&mut buffer).unwrap();
-    return serde_json::from_slice(&buffer).unwrap();
+    let meta: db721_Metadata =  serde_json::from_slice(&buffer).unwrap();
+    let file_length: i32 = f.metadata().unwrap().len().try_into().unwrap();
+    let start_metadata =  file_length - i32::from(out)-4;
+    return Metadata { table: meta.table, max_values_per_block: meta.max_values_per_block, columns: meta.columns, start_metadata: start_metadata}
 }
 
 // Should we return the data out in the format here using some? Lets first define exactly two columns :) 
 #[derive(Debug)]
+// This one needs to become generic it can not be a static type as we have here since it will vary between. 
 pub struct Frame{
-    WeightG: Option<Vec<i32>>,
-    AgeWeeks: Option<Vec<i32>>,
-    Identifier: Option<Vec<i32>>
+    pub WeightG: Option<Vec<i32>>,
+    pub AgeWeeks: Option<Vec<i32>>,
+    pub Identifier: Option<Vec<i32>>
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FilterType{
     Greater,
     Less,
@@ -67,18 +85,18 @@ pub enum FilterType{
     Or,  
 }
 
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub enum Values{
     String(String),
     Int(i64),
     Float(f64)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Filter {
-    column: String,
-    filter: FilterType,
-    value: Values,
+    pub column: String,
+    pub filter: FilterType,
+    pub value: Values,
 }
 
 
@@ -188,6 +206,8 @@ impl Metadata{
         let mut blocks = Vec::<String>::new();
         let mut offsets = Vec::<i32>::new();
 
+        offsets.push(self.start_metadata);
+
         for (column, columnData) in self.columns.iter() {
             if filter.contains_key(column){
                 let Some(column_filter) = filter.get(column) else { todo!() };
@@ -205,7 +225,7 @@ impl Metadata{
         return (skip_blocks, offsets)
     }
 
-    pub fn filter(&self, filter:HashMap<String, Filter> ) -> Frame{
+    pub fn filter(&self, filter:HashMap<String, Filter> ) -> HashMap<String, Vec<Datum>>{
 
         // Here we filter out which blocks are of interest
         // Predicate push down
@@ -214,117 +234,190 @@ impl Metadata{
         // Here we start to read the data, 
         let mut f = File::open("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721").unwrap();
 
-        // Here we start with the values
-        let mut out:Vec<i32> = Vec::new();
-
-        println!("{:#?}", skip_blocks);
+        println!("skip blocks {:#?}", skip_blocks);
 
         // for the values we like to keep
         // Map[Block]Map[Row]bit
         let keep_value: HashMap<String, HashMap<String, i32>> = HashMap::new();
-        let mut identifier_vec = Vec::new();
 
         // Make the vectors here and add to them in the end return the frame with the vectors takeing the ownershipt
         // seems easier!
 
+        // How to do this
+        // Load all data
+        // For each create the array of bitmaps
+        // Combine the bitmaps
+        // Filter all the data
+        // Pass the data out. 
+
+        let mut out:HashMap<String, Vec<Datum>> = HashMap::new();
+        let mut bit_maps:HashMap<String, Vec<bool>> = HashMap::new();
+        let mut bit_map:Vec<bool> = Vec::new();
+
         for (column, column_data) in self.columns.iter() {
-            let Some(column_filter) = filter.get(column) else { continue; };
+            let mut vector:Vec<Datum> = Vec::new();
+            bit_map= Vec::new();
+
             for (block_index, _stats) in column_data.block_stats.iter(){
-                println!("Start block: {}",block_index );
+                log!("Start block: {}",block_index );
                 if skip_blocks.contains(block_index){
-                    println!("Skip block: {}", block_index);
+                    log!("Skip block: {}", block_index);
                     continue;
                 }
 
                 // READ THE ACTUAL DATA
 
+                // WE DONT HANDLE STR CORRECT!!!!
+                // THIS IS AN ISSUE!!!!!
+                // WE DONT HANDLE THE LAST BYTES CORRECT!!!!
+
                 // Here we read the data lets figure our later how we filter the other rows efficiently
                 // Read the last 4 bytes to get the size of the metadata
                 let block_index:i32 = block_index.parse().unwrap();
-                let start:u64 = (column_data.start_offset*(1+block_index)).try_into().unwrap();
+                let start:u64 = (column_data.start_offset +(block_index*self.max_values_per_block*4)).try_into().unwrap();
                 f.seek(SeekFrom::Start(start)).unwrap(); // We want the last 4 bytes
-                let block_bytes = if block_index == column_data.num_blocks{ first_after(&offsets,&column_data.start_offset)} else {
-                    Some(self.max_values_per_block*4)
-                };
-                let block_bytes = block_bytes.unwrap(); // fix this later on. 
-                let mut buffer = vec![0u8; block_bytes.try_into().unwrap()];
-                f.read_exact(&mut buffer).unwrap();
+                log!("The block: {}, the number of blocks: {}", block_index, column_data.num_blocks);
 
+
+                // let block_bytes = if block_index == (column_data.num_blocks-1){ 
+                //         log!("Inside the check, offset: {:?}, first after: {}", offsets, &column_data.start_offset);
+
+                //         // CHECK HERE IF NONE use end of the blocks(remove the meta data and so on)
+                //         // Continue here
+                //         let block_bytes = first_after(&offsets,&column_data.start_offset).unwrap();
+                //         block_bytes - (column_data.start_offset +(block_index*self.max_values_per_block*4))
+                //     } else {
+                //         self.max_values_per_block*4
+                // };
+
+                // log!("Start to read from: {}, reading bytes: {}", start, block_bytes);
+                // let mut buffer = vec![0u8; block_bytes.try_into().unwrap()];
+                // log!("block_bytes: {}, total nbr of blocks: {}, max values: {}, column: {}", block_bytes, column_data.num_blocks, self.max_values_per_block*4, column);
+                // f.read_exact(&mut buffer).unwrap();
+                // log!("IS THIS THE ISSUE 3");
+
+                // CONTINUE HERE
+                // WE could reuse a buffer to reduce memory allocations
+                let buffer = reader(&mut f, block_index, column_data, &offsets, self.max_values_per_block);
 
                 // PARSE THE BUFFER TO BYTES
                 for i in (0..buffer.len()).step_by(4) {
                     // only handle int now
-                    
                     match column_data.column_type.as_str() {
                         "int" =>{
                             let val = LittleEndian::read_i32(&buffer[i..]);
-                            match  column_filter.filter {
-                                FilterType::Equal => {
-                                    if Values::Int(val as _) == column_filter.value{ 
-                                        continue
-                                    }
-                                },
-                                FilterType::Greater => 
-                                    if Values::Int(val as _) <= column_filter.value{ 
-                                        continue
+                            if let Some(column_filter) = filter.get(column){
+                                // this is for the bitmap stuff
+                                match  column_filter.filter {
+                                    FilterType::Equal => {
+                                        if Values::Int(val as _) == column_filter.value{ 
+                                            bit_map.push(false);
+                                        }
                                     },
-                                FilterType::Less =>                                     
-                                    if Values::Int(val as _) >= column_filter.value{ 
-                                        continue
-                                },
-                                FilterType::Or => (),
-                            }
-                            match column.as_str() {
-                                "identifier"=>{
-                                        identifier_vec.push(val);
-                                },
-                                _ => (),
+                                    FilterType::Greater => 
+                                        if Values::Int(val as _) <= column_filter.value{ 
+                                            bit_map.push(false);
+                                        },
+                                    FilterType::Less =>                                     
+                                        if Values::Int(val as _) >= column_filter.value{ 
+                                            bit_map.push(false);
+                                    },
+                                    FilterType::Or => (),
+                                }
+                            } else {
+                                bit_map.push(true);
+                            };
+                            if let Some(d_val) =  val.into_datum(){
+                                vector.push(d_val);
                             }
                         }
                         "float" =>{
                             let val = LittleEndian::read_i32(&buffer[i..]);
-                            match  column_filter.filter {
-                                FilterType::Equal => {
-                                    if Values::Float(val as _) == column_filter.value{ 
-                                        continue
-                                    }
-                                },
-                                FilterType::Greater => 
-                                    if Values::Float(val as _) <= column_filter.value{ 
-                                        continue
+                            if let Some(column_filter) = filter.get(column){
+                                match  column_filter.filter {
+                                    FilterType::Equal => {
+                                        if Values::Float(val as _) == column_filter.value{ 
+                                            bit_map.push(false);
+                                        }
                                     },
-                                FilterType::Less =>                                     
-                                    if Values::Float(val as _) >= column_filter.value{ 
-                                        continue
-                                },
-                                FilterType::Or => (),
-                            }
+                                    FilterType::Greater => 
+                                        if Values::Float(val as _) <= column_filter.value{ 
+                                            bit_map.push(false);
+                                        },
+                                    FilterType::Less =>                                     
+                                        if Values::Float(val as _) >= column_filter.value{ 
+                                            bit_map.push(false);
+                                    },
+                                    FilterType::Or => (),
+                                }
+                                if let Some(d_val) =  val.into_datum(){
+                                    vector.push(d_val);
+                                }
+                            } else {
+                                bit_map.push(true);
+                            };
                         }
                         "str" =>(),
                         _ => (),
                     }
                 }
                 // here we need to apply the filters and keep this for the other columns ...
-
-
             }
-            break
+            out.insert(column.to_string(), vector);
+            bit_maps.insert(column.to_string(), bit_map.clone());
         }
+
+        // Continue here with joining the bitmaps to one! 
+        for (k,v) in bit_maps.iter(){
+            bit_map = v
+                .iter()
+                .zip(v.iter())
+                .map(|(v, c)| if c | v { false } else { true })
+                .collect();
+        }
+        let tmp: HashMap<String, Vec<Datum>> = HashMap::new();
+        for (k,v) in out.iter(){
+            let vals:Vec<Datum> = v.iter()
+            .zip(bit_map.iter().copied())
+            .filter(|(v,c)| c.clone())
+            .map(|(v, c)| *v)
+            .collect();
+        }
+
         // 2 read the data of interest
         println!("{:#?}", skip_blocks);
         println!("{:#?}", out.len());
-        let frame = Frame{
-            Identifier: Some(identifier_vec),
-            AgeWeeks: None,
-            WeightG: None,
-        };
-        return frame
+        return out
     }
 
 
 }
 
+fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i32>, max_values_per_block: i32) -> Vec<u8> {
+    let multiple =  match column_data.column_type.as_str(){
+        "int" => 4, 
+        "float" => 4,
+        "str" => 32,
+        _ => 4,
+    };
 
+    let block_bytes = if block_index == (column_data.num_blocks-1){ 
+            log!("Inside the check, offset: {:?}, first after: {}", offsets, &column_data.start_offset);
+
+            // CHECK HERE IF NONE use end of the blocks(remove the meta data and so on)
+            // Continue here
+            let block_bytes = first_after(&offsets,&column_data.start_offset).unwrap();
+            block_bytes - (column_data.start_offset +(block_index*max_values_per_block*multiple))
+        } else {
+            max_values_per_block*multiple
+    };
+
+    let mut buffer = vec![0u8; block_bytes.try_into().unwrap()];
+    log!("block_bytes: {}, total nbr of blocks: {}, max values: {}", block_bytes, column_data.num_blocks, max_values_per_block*multiple);
+    f.read_exact(&mut buffer).unwrap();
+    log!("IS THIS THE ISSUE 3");
+    return buffer;
+}
 
 // take the filters as a list
 
@@ -337,7 +430,7 @@ impl Metadata{
 
 fn main() {
     println!("Hello World!");
-    let meta = read_metadata("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721".to_string());
+    let meta= read_metadata("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721".to_string());
     println!("{}", meta.table);
     for (column, value) in meta.columns.iter() {
         println!("the column is: {}, the start offset is: {}, nbr blocks {}", column, value.start_offset, value.num_blocks);
@@ -366,7 +459,7 @@ fn main() {
     };
     let mut mappy: HashMap<String, Filter> = HashMap::new();
     mappy.insert("identifier".to_string(), filter);
-    println!("{:?}", Some(meta.filter(mappy).Identifier));
+    println!("{:?}", Some(meta.filter(mappy)));
 
 
     // next step is to further understand the format of the blocks.

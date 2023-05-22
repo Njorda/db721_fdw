@@ -1,9 +1,14 @@
+use parser::db721::{Values, FilterType};
 use pgrx::*;
 use std::os::raw::c_int;
 use std::collections::HashMap;
 use std::ffi::CStr;
+use pgrx::{
+    pg_sys::{self, Datum, Oid},
+    FromDatum, IntoDatum, PgBuiltInOids, PgOid,
+};
 
-use crate::parser::db721::{read_metadata, Metadata};
+use crate::parser::db721::{read_metadata, Metadata, Filter};
 
 pub mod parser;
 
@@ -14,11 +19,12 @@ pub struct FdwState {
     rownum: usize,
     opts: HashMap<String, String>,
     metadata: Option<Metadata>, 
+    filters: HashMap<String, Filter>
 }
 
 impl FdwState {
     pub fn new() -> Self {
-        Self { rownum: 0 , opts: HashMap::new(), metadata: None}
+        Self { rownum: 0 , opts: HashMap::new(), metadata: None, filters: HashMap::new()}
     }
 }
 
@@ -61,14 +67,173 @@ pub(crate) unsafe fn extract_from_op_expr(
     baserel_id: pg_sys::Oid,
     baserel_ids: pg_sys::Relids,
     expr: *mut pg_sys::OpExpr,
-){
+)-> Option<Filter>{
     let args: PgList<pg_sys::Node> = PgList::from_pg((*expr).args);
     // only deal with binary operator
-    log!("args are: {}", args.len())
+    let opno = (*expr).opno;
+    let op = get_operator(opno);
+    log!("Operator: {:?}, ", pgrx::name_data_to_str(&(*op).oprname).to_string());
+
+
+    log!("The list lenght is: {}, ",args.len());
+
+    // only deal with binary operators
+    // Operators that are working on one column.
+    if args.len() != 2 {
+        return None;
+    }
+
+    // Continue here tomorrow
+    // This is the place
+    if let (Some(mut left), Some(mut right)) = (args.get_ptr(0), args.get_ptr(1)){
+
+        // swap operands if needed
+        if is_a(right, pg_sys::NodeTag_T_Var)
+            && !is_a(left, pg_sys::NodeTag_T_Var)
+            // https://www.postgresql.org/docs/current/catalog-pg-operator.html, Commutator of this operator (zero if none)
+            // https://www.postgresql.org/docs/current/xoper-optimization.html
+            // if Commutator is 0 then swapping is not possible since there is not opposite operator
+            // if it is zero then there is no operator that represent the changed order!
+            && (*op).oprcom.as_u32() != 0
+        {
+            std::mem::swap(&mut left, &mut right);
+        }
+
+        // We check here that the left side is a variable and the right is a constant. 
+        if is_a(left, pg_sys::NodeTag_T_Var) && is_a(right, pg_sys::NodeTag_T_Const) {
+            // Then we do some casting magic here...
+            let left = left as *mut pg_sys::Var;
+            let right = right as *mut pg_sys::Const;
+
+            // https://www.postgresql.org/docs/7.3/parser-stage.html
+            // The field varattno gives the position of the attribute within the relation
+            // Check if varno part of baserel_ids
+            // baserel_ids table id I guess
+            // https://doxygen.postgresql.org/pathnodes_8h_source.html
+            if pg_sys::bms_is_member((*left).varno as c_int, baserel_ids) && (*left).varattno >= 1 {
+                // Here we get the attribute name
+                let field = pg_sys::get_attname(baserel_id, (*left).varattno, false);
+                // here we get the constant value from postgress
+                // datum in postgres is just a data type for holding information. 
+
+                // Need to write this function and we dotn have cell I belive we want filter instead
+                let value = from_polymorphic_datum(
+                    (*right).constvalue,
+                    (*right).constisnull,
+                    (*right).consttype,
+                );
+
+
+
+                if let Some(value) = value {
+                    let filter = match pgrx::name_data_to_str(&(*op).oprname){
+                        "=" => FilterType::Equal,
+                        ">" => FilterType::Greater,
+                        "<" => FilterType::Less,
+                        _ => {
+                            return None},
+                    };
+
+                    let qual = Filter {
+                        column: CStr::from_ptr(field).to_str().unwrap().to_string(),
+                        filter: filter,
+                        value: value,
+                    };
+                    return Some(qual);
+                } else {
+                    todo!()
+                }
+            }
+        }
+    }
+    return None
+
+    //The args will hold the arguments for the operator, I just don't get why we collect them differently...
     // we can now get it out if we like to. 
     // WOOOP WOOOP
 }
 
+
+// Funcion that takes a postgres datum
+// https://stackoverflow.com/questions/53543909/what-exactly-is-datum-in-postgresql-c-language-functions
+
+unsafe fn from_polymorphic_datum(datum: Datum, is_null: bool, typoid: Oid) -> Option<Values>{
+    if is_null {
+        return None;
+    }
+    match PgOid::from(typoid) {
+        PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
+            None
+        }
+        PgOid::BuiltIn(PgBuiltInOids::CHAROID) => {
+            Some(Values::Int(i8::from_datum(datum, false).unwrap().into()))
+        }
+        PgOid::BuiltIn(PgBuiltInOids::INT2OID) => {
+            Some(Values::Int(i16::from_datum(datum, false).unwrap().into()))
+        }
+        PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID) => {
+            Some(Values::Float(f32::from_datum(datum, false).unwrap().into()))
+        }
+        PgOid::BuiltIn(PgBuiltInOids::INT4OID) => {
+            Some(Values::Int(i32::from_datum(datum, false).unwrap().into()))
+        }
+        PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID) => {
+            Some(Values::Float(f64::from_datum(datum, false).unwrap().into()))
+        }
+        PgOid::BuiltIn(PgBuiltInOids::INT8OID) => {
+            Some(Values::Int(i64::from_datum(datum, false).unwrap().into()))
+        }
+        PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
+            None
+        }
+        PgOid::BuiltIn(PgBuiltInOids::TEXTOID) => {
+            None
+        }
+        PgOid::BuiltIn(PgBuiltInOids::DATEOID) => {
+            None
+        }
+        PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => {
+            None
+        }
+        PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => {
+            None
+        }
+        _ => None,
+    }
+}
+
+
+//https://dba.stackexchange.com/questions/232870/are-cataloge-and-relation-cache-in-postgresql-per-connection-or-global-to-the-se
+//we get this from cache of the query parameters, I just dont get why
+//Is this how postgres really works 
+//Very hard to learn
+//wow it works in the ned
+// we get the values form the cache for the query. 
+pub(crate) unsafe fn get_operator(opno: pg_sys::Oid) -> pg_sys::Form_pg_operator {
+    let htup = pg_sys::SearchSysCache1(
+        pg_sys::SysCacheIdentifier_OPEROID.try_into().unwrap(),
+        opno.try_into().unwrap(),
+    );
+    if htup.is_null() {
+        pg_sys::ReleaseSysCache(htup);
+        pgrx::error!("cache lookup operator {} failed", opno);
+    }
+    let op = pg_sys::GETSTRUCT(htup) as pg_sys::Form_pg_operator;
+    // Since we do this does that mean that the next time we get the next one?
+    // So we can get all the operators, incase there are multiple once?
+    pg_sys::ReleaseSysCache(htup);
+    op
+}
+
+pub(crate) unsafe fn unnest_clause(node: *mut pg_sys::Node) -> *mut pg_sys::Node {
+    if is_a(node, pg_sys::NodeTag_T_RelabelType) {
+        (*(node as *mut pg_sys::RelabelType)).arg as _
+    } else if is_a(node, pg_sys::NodeTag_T_ArrayCoerceExpr) {
+        (*(node as *mut pg_sys::ArrayCoerceExpr)).arg as _
+    } else {
+        node
+    }
+}
 
 #[pg_guard]
 unsafe extern "C" fn hello_get_foreign_rel_size(
@@ -84,23 +249,24 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
     // Allocate a box with the memory, zero initiallize it now. 
     let mut state = pgrx::PgBox::<FdwState>::alloc0();
 
+    // Here we start to handle the conditions
     let conds = PgList::<pg_sys::RestrictInfo>::from_pg((*baserel).baserestrictinfo);
+    let mut filters:HashMap<String, Filter> = HashMap::new();
     for cond in conds.iter_ptr() {
         let expr = (*cond).clause as *mut pg_sys::Node;
-        let _extracted = if is_a(expr, pg_sys::NodeTag_T_OpExpr) {
-            extract_from_op_expr(root, foreigntableid, (*baserel).relids, expr as _)
-        } else if is_a(expr, pg_sys::NodeTag_T_NullTest) {
-            extract_from_null_test(foreigntableid, expr as _)
-        } else if is_a(expr, pg_sys::NodeTag_T_BoolExpr) {
-            extract_from_bool_expr(root, foreigntableid, (*baserel).relids, expr as _)
-        } else {
-            log!("Other");
-            if let Some(stm) = pgrx::nodes::node_to_string(expr) {
-                log!("issues");
+        if is_a(expr, pg_sys::NodeTag_T_OpExpr) {
+            let filter = extract_from_op_expr(root, foreigntableid, (*baserel).relids, expr as _);
+            if let Some(filter) = filter{
+                filters.insert(filter.column.clone(),filter);
             }
+        } else {
+            continue;
         };
+
+
     }
-    log!("DONE HERE NOW");
+
+    // Here we handled the options
     let mut ret = HashMap::new();
     let ftable = pg_sys::GetForeignTable(foreigntableid);
     let options: PgList<pg_sys::DefElem> = PgList::from_pg((*ftable).options);
@@ -119,61 +285,13 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         log!("Metadata is set");
     }
     state.opts = ret; 
+    state.filters = filters;
     
     // Continue here , maybe as _ is enough ... 
     (*baserel).fdw_private = state.into_pg() as *mut std::ffi::c_void;
 
     // Print all the options here and if they are expected and so on. 
 
-}
-
-pub(crate) unsafe fn extract_from_null_test(
-    baserel_id: pg_sys::Oid,
-    expr: *mut pg_sys::NullTest,
-){
-    let var = (*expr).arg as *mut pg_sys::Var;
-    log!("Null test");
-    if !is_a(var as _, pg_sys::NodeTag_T_Var) || (*var).varattno < 1 {
-        return;
-    }
-
-    let field = pg_sys::get_attname(baserel_id, (*var).varattno, false);
-
-    let opname = if (*expr).nulltesttype == pg_sys::NullTestType_IS_NULL {
-        "is".to_string()
-    } else {
-        "is not".to_string()
-    };
-
-    log!("The answere is: {}", opname)
-}
-
-
-
-pub(crate) unsafe fn extract_from_bool_expr(
-    _root: *mut pg_sys::PlannerInfo,
-    baserel_id: pg_sys::Oid,
-    baserel_ids: pg_sys::Relids,
-    expr: *mut pg_sys::BoolExpr,
-) {
-    let args: PgList<pg_sys::Node> = PgList::from_pg((*expr).args);
-
-    log!("Bool stuff");
-    if (*expr).boolop != pg_sys::BoolExprType_NOT_EXPR || args.len() != 1 {
-        return;
-    }
-
-    let var = args.head().unwrap() as *mut pg_sys::Var;
-    if (*var).varattno < 1
-        || (*var).vartype != pg_sys::BOOLOID
-        || !pg_sys::bms_is_member((*var).varno as c_int, baserel_ids)
-    {
-        return;
-    }
-
-    let field = pg_sys::get_attname(baserel_id, (*var).varattno, false);
-
-    log!("The operator is: =")
 }
 
 
@@ -214,6 +332,7 @@ unsafe extern "C" fn hello_get_foreign_plan(
 
     let state = PgBox::<FdwState>::from_pg((*baserel).fdw_private as _);
 
+    // This is needed in order to pass on the filters. 
     scan_clauses = pg_sys::extract_actual_clauses(scan_clauses, false);
 
     let mut ret = PgList::new();
@@ -271,19 +390,7 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     let cst = list.head().unwrap();
     let ptr = i64::from_datum((*cst).constvalue, (*cst).constisnull).unwrap();
     let mut state:PgBox::<FdwState> = PgBox::from_pg(ptr as _);
-
-    // Continue here as well! 
-    // let state = PgBox::<FdwState, AllocatedByPostgres>::PgBox::from_pg((*baserel).fdw_private as _);
-
-    // this one is null heeeeereeee that is an issue for sure. 
-    //let mut state: PgBox<FdwState> = PgBox::<FdwState>::from_pg((*node).fdw_state as _);
-    // let mut state = FdwState::deserialize_from_list((*plan).fdw_private as _);
-
-    // This is the next step to do tomorrow, we should get this from the plan that was made
-    // But we need to figure out how we store this correctly. 
-    // let mut state: PgBox<FdwState, AllocatedByRust> = pgrx::PgBox::<FdwState>::alloc0();
     state.rownum = 0;
-    // Here we add a duckdb query instead ... 
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
 }
 
@@ -296,18 +403,19 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     let state = (*node).fdw_state as *mut FdwState;
     // when this happens we will not load more data, we return one or multiple rows here as I understand
     // we want to limit how often we read the file so his will be relevant.
-    log!("Inside the itter stuff now:{}", (*state)); 
+    log!("Inside the itter stuff now:{}", (*state).rownum); 
     if (*state).rownum > 10 { // https://www.highgo.ca/2021/09/03/implement-foreign-scan-with-fdw-interface-api/
         (*(*slot).tts_ops).clear.expect("missing")(slot);
         return slot;
     }
+
 
     // for some reason we only get the last one here ... 
     // We only get the last one and that is how it is supposed to be and that is fine ... 
     // We will return one row per fetch as I understand, but we can fetch it all in one go. 
     let rel = (*node).ss.ss_currentRelation;
     let attinmeta = pg_sys::TupleDescGetAttInMetadata((*rel).rd_att);
-    let natts = (*(*rel).rd_att).natts;
+    let natts = (*(*rel).rd_att).natts; // nbr attributes that we have, I guess this is set from the server
 
     let size = std::mem::size_of::<*const ::std::os::raw::c_char>() * natts as usize;
     let values = pg_sys::palloc0(size) as *mut *const ::std::os::raw::c_char;
@@ -318,7 +426,19 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     slice[1] = hello_world2.as_ptr();
     let tuple =
         pg_sys::BuildTupleFromCStrings(attinmeta, values as *mut *mut ::std::os::raw::c_char);
+    log!("WE ARE HERE");
+    if let Some(meta) = &(*state).metadata{
+        log!("WE ARE HERE 2");
+        if (*state).rownum < 1 {
+            let filters = &(*state).filters;
+            // It is empty inside here ... the question is then whyyyyyyyy
+            let data = meta.filter(filters.clone());
+            // Reformat the data here to match the output format that is expected!
+        }
 
+    }else {
+        return slot;
+    };
     // Need one of these per row, and why is that???
     pg_sys::ExecStoreHeapTuple(tuple, slot, false);
     (*state).rownum += 1;
