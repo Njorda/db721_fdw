@@ -277,27 +277,7 @@ impl Metadata{
                 let start:u64 = (column_data.start_offset +(block_index*self.max_values_per_block*4)).try_into().unwrap();
                 f.seek(SeekFrom::Start(start)).unwrap(); // We want the last 4 bytes
                 log!("The block: {}, the number of blocks: {}", block_index, column_data.num_blocks);
-
-
-                // let block_bytes = if block_index == (column_data.num_blocks-1){ 
-                //         log!("Inside the check, offset: {:?}, first after: {}", offsets, &column_data.start_offset);
-
-                //         // CHECK HERE IF NONE use end of the blocks(remove the meta data and so on)
-                //         // Continue here
-                //         let block_bytes = first_after(&offsets,&column_data.start_offset).unwrap();
-                //         block_bytes - (column_data.start_offset +(block_index*self.max_values_per_block*4))
-                //     } else {
-                //         self.max_values_per_block*4
-                // };
-
-                // log!("Start to read from: {}, reading bytes: {}", start, block_bytes);
-                // let mut buffer = vec![0u8; block_bytes.try_into().unwrap()];
-                // log!("block_bytes: {}, total nbr of blocks: {}, max values: {}, column: {}", block_bytes, column_data.num_blocks, self.max_values_per_block*4, column);
-                // f.read_exact(&mut buffer).unwrap();
-                // log!("IS THIS THE ISSUE 3");
-
-                // CONTINUE HERE
-                // WE could reuse a buffer to reduce memory allocations
+                
                 let buffer = reader(&mut f, block_index, column_data, &offsets, self.max_values_per_block);
 
                 // PARSE THE BUFFER TO BYTES
