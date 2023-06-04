@@ -1,15 +1,15 @@
-use parser::db721::{Values, FilterType};
+use parser::db721::{Values, FilterType, ColumnMetadada};
 use pgrx::*;
 use std::os::raw::c_int;
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::ptr;
 use pgrx::{
     pg_sys::{self, Datum, Oid},
     FromDatum, IntoDatum, PgBuiltInOids, PgOid,
 };
 
 use crate::parser::db721::{read_metadata, Metadata, Filter};
-
 pub mod parser;
 
 pg_module_magic!();
@@ -23,7 +23,12 @@ pub struct FdwState {
     val: Vec<Datum>,
     nulls: Vec<bool>,
     tmp_ctx: PgMemoryContexts,
+    cols: Vec<ColumnMetadada>,
+    tuples: Vec<Vec<Datum>>,
 }
+
+
+
 
 impl FdwState {
     pub unsafe fn new() -> Self {
@@ -33,8 +38,10 @@ impl FdwState {
             , filters: HashMap::new()
             , val: Vec::<Datum>::new()
             , nulls: Vec::<bool>::new()
+            , cols: Vec::new()
             , tmp_ctx: PgMemoryContexts::CurTransactionContext
             .switch_to(|_| PgMemoryContexts::new("Wrappers temp data")),
+            tuples: Vec::new()
         }
     }
 }
@@ -273,8 +280,6 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         } else {
             continue;
         };
-
-
     }
 
     // Here we handled the options
@@ -295,6 +300,44 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         state.metadata = Some(read_metadata(filename.to_string()));
         log!("Metadata is set");
     }
+
+
+    let mut col_vars: *mut pg_sys::List = ptr::null_mut();
+
+    // Here we handle which columns where selected
+    let mut cols = Vec::new();
+    let tgt_list: PgList<pg_sys::Node> = PgList::from_pg((*(*baserel).reltarget).exprs);
+    for tgt in tgt_list.iter_ptr() {
+        let tgt_cols = pg_sys::pull_var_clause(
+            tgt,
+            (pg_sys::PVC_RECURSE_AGGREGATES | pg_sys::PVC_RECURSE_PLACEHOLDERS)
+                .try_into()
+                .unwrap(),
+        );
+        col_vars = pg_sys::list_union(col_vars, tgt_cols);
+    }
+
+    let col_vars: PgList<pg_sys::Var> = PgList::from_pg(col_vars);
+    for var in col_vars.iter_ptr() {
+        let rte = pg_sys::planner_rt_fetch((*var).varno as u32, root);
+        let attno = (*var).varattno;
+        let attname = pg_sys::get_attname((*rte).relid, attno, true);
+        if !attname.is_null() {
+            // generated column is not supported
+            if pg_sys::get_attgenerated((*rte).relid, attno) > 0 {                continue;
+            }
+
+            let type_oid = pg_sys::get_atttype((*rte).relid, attno);
+            cols.push(ColumnMetadada {
+                name: CStr::from_ptr(attname).to_str().unwrap().to_owned(),
+                num: attno as usize,
+                type_oid,
+            });
+        }
+    }
+
+    log!("The columns are: {:?}", cols);
+    state.cols = cols;
     state.opts = ret; 
     state.filters = filters;
     
@@ -394,8 +437,8 @@ unsafe extern "C" fn hello_begin_foreign_scan(
         return;
     }
 
+    // Get the state correctly
     let scan_state = (*node).ss;
-
     let plan = scan_state.ps.plan as *mut pg_sys::ForeignScan;
     let list = PgList::<pg_sys::Const>::from_pg((*plan).fdw_private );
     let cst = list.head().unwrap();
@@ -413,92 +456,6 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     state.nulls.extend_from_slice(&vec![true; natts]);
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
 }
-
-// #[pg_guard]
-// unsafe extern "C" fn hello_iterate_foreign_scan(
-//     node: *mut pg_sys::ForeignScanState,
-// ) -> *mut pg_sys::TupleTableSlot {
-//     log!("stuff two");
-//     let slot = (*node).ss.ss_ScanTupleSlot;
-//     let state = (*node).fdw_state as *mut FdwState;
-//     // when this happens we will not load more data, we return one or multiple rows here as I understand
-//     // we want to limit how often we read the file so his will be relevant.
-//     log!("Inside the itter stuff now:{}", (*state).rownum); 
-//     if (*state).rownum > 10 { // https://www.highgo.ca/2021/09/03/implement-foreign-scan-with-fdw-interface-api/
-//         (*(*slot).tts_ops).clear.expect("missing")(slot);
-//         return slot;
-//     }
-
-
-//     // for some reason we only get the last one here ... 
-//     // We only get the last one and that is how it is supposed to be and that is fine ... 
-//     // We will return one row per fetch as I understand, but we can fetch it all in one go. 
-//     // let rel = (*node).ss.ss_currentRelation;
-//     // let attinmeta = pg_sys::TupleDescGetAttInMetadata((*rel).rd_att);
-//     // let natts = (*(*rel).rd_att).natts; // nbr attributes that we have, I guess this is set from the server
-//     // log!("nbr of attr: {}", natts);
-
-//     // let size = std::mem::size_of::<*const ::std::os::raw::c_char>() * natts as usize;
-//     // let values = pg_sys::palloc0(size) as *mut *const ::std::os::raw::c_char;
-//     // let slice = std::slice::from_raw_parts_mut(values, size);
-//     // let tuple = pg_sys::BuildTupleFromCStrings(attinmeta, values as *mut *mut ::std::os::raw::c_char);
-//     // let hello_world = std::ffi::CString::new("Hello new,World").expect("invalid");
-//     // let hello_world2 = std::ffi::CString::new((*state).rownum.to_string()).expect("invalid");
-//     // slice[0] = hello_world.as_ptr();
-//     // slice[1] = hello_world2.as_ptr();
-//     // // slice[1] = val.cast_mut_ptr();
-//     // pg_sys::ExecStoreHeapTuple(tuple, slot, false);
-//     // (*state).rownum += 1;
-//     // log!("The state is: {}", (*state).rownum);
-//     // log!("The slice: {:?}", slice);
-
-//     // clear slot
-//     let slot = (*node).ss.ss_ScanTupleSlot;
-//     if let Some(clear) = (*(*slot).tts_ops).clear {
-//         clear(slot);
-//     }
-
-
-
-//     log!("WE ARE HERE");
-//     if let Some(meta) = &(*state).metadata{
-//         log!("WE ARE HERE 2");
-//         // if (*state).rownum < 1 { // read all the data here later on 
-//             let filters = &(*state).filters;
-//             // It is empty inside here ... the question is then whyyyyyyyy
-//             let data = meta.filter(filters.clone());
-//             // Reformat the data here to match the output format that is expected!
-//             for (column, values) in data.iter(){// this is not ordered which need to be handled ...
-//                 log!("WE ARE HERE 3");
-//                 // Pick column of int type here
-//                 // Continue here instead. 
-//                 // Convert the hashmap to a vector with a set order that we want to keep
-//                 // Send the stuff out.
-//                 let mut vecy = Vec::<Datum >::new();
-//                 for val in values.iter(){
-//                     log!("WE ARE HERE 4");
-
-//                     log!("The value is: {:?}, column is {}", val, column);
-//                     // slice[1] = val.cast_mut_ptr();
-                    
-//                     vecy.push(val.clone());
-//                     break;
-
-//                 }
-//                 (*slot).tts_values = vecy.as_mut_ptr();
-//                 pg_sys::ExecStoreVirtualTuple(slot);
-
-//                 (*state).rownum += 1;
-//                 log!("The state is: {}", (*state).rownum);
-//                 return slot
-//             // }
-//         }
-//     } else {
-//         return slot;
-//     };
-//     return slot
-// }
-
 
 #[pg_guard]
 unsafe extern "C" fn hello_iterate_foreign_scan(
@@ -523,61 +480,21 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     }
 
     log!("WE ARE HERE");
-    if let Some(meta) = &(*state).metadata{
-        log!("WE ARE HERE 2");
-        // if (*state).rownum < 1 { // read all the data here later on 
-            let filters = &(*state).filters;
-            // It is empty inside here ... the question is then whyyyyyyyy
-            let data = meta.filter(filters.clone());
-            // Reformat the data here to match the output format that is expected!
-            for (column, values) in data.iter(){// this is not ordered which need to be handled ...
-                log!("WE ARE HERE 3");
-                // Pick column of int type here
-                // Continue here instead. 
-                // Convert the hashmap to a vector with a set order that we want to keep
-                // Send the stuff out.
-                log!("THe nbr of elements are: {}, and the columns are: {}", values.len(), column);
-                if values.len() < 1{
-                    continue;
-                }
-                for val in values.iter(){
-                    log!("WE ARE HERE 4");
 
-                    log!("The value is: {:?}, column is {}", val, column);
-                    // how does rust know that it should keep this one alive? 
-                    // Not sure how that changes witht he memory context ...
-                    // maybe it the list is persisted already .. though
-                    let tmp1 = "hello";
-                    let tmp2: i32 = 100;
-                    // If the type is wrong we get the wrong stuff out ... that is just the way it is ...
-                    // 
-                    state.val[0] = tmp1.into_datum().unwrap();
-                    state.val[1] = val.clone();//tmp2.into_datum().unwrap();
-                    state.nulls[0] = false;
-                    state.nulls[1] = false;
-                    // I think we fail here due to a nil pointer ...
-                    // Add this to the state instead, however the state will be relativly big
-                    // Could be shareded though.
-                    // continue here tomorrow. 
-                    // create values that are keept around
-                    // 
-                    log!("WE ARE HERE 4 1");
-                    break
-                }
-                break
-        }
-    } else {
-    };
-    log!("WE ARE HERE 4 2");
-    (*slot).tts_values = state.val.as_mut_ptr();
+    if (*state).rownum == 0 {
+        let meta = (*state).metadata.clone().unwrap();
+        let filters = &(*state).filters;
+        let data = meta.filter(filters.clone());
+        (*state).tuples = meta.tuples(&data, (*state).cols.clone());
+        (*state).nulls = vec![false; 7];
+    }
+
+    (*slot).tts_values = (*state).tuples[0].as_mut_ptr();
     (*slot).tts_isnull = state.nulls.as_mut_ptr();
-    log!("WE ARE HERE 4 3");
     pg_sys::ExecStoreVirtualTuple(slot);
-    log!("WE ARE HERE 4 4");
     state.rownum += 1;
-    log!("WE ARE HERE 4 5");
     old_ctx.set_as_current();
-    slot
+    return slot
 }
 
 

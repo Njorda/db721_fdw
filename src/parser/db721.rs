@@ -1,4 +1,4 @@
-use std::{fs::File, io::{Read, Seek, SeekFrom}, any::Any};
+use std::{fs::File, io::{Read, Seek, SeekFrom}, str};
 use std::collections::{HashMap, HashSet};
 use pgrx::pg_sys::{self, Datum, Oid};
 use pgrx::*;
@@ -13,7 +13,7 @@ use serde_json::{Value, Map, Number}; //https://stackoverflow.com/questions/3914
 // Check the scripts they have for installation .. 
 
 /// a struct into which to decode the thing
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Columns{
     #[serde(rename = "type")]
     column_type: String,
@@ -23,6 +23,16 @@ pub struct Columns{
     num_blocks: i32,
 
     block_stats: HashMap<String, HashMap<String, Value>,>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ColumnMetadada {
+    /// column name
+    pub name: String,
+    /// 1-based column number
+    pub num: usize,
+    /// column type OID, can be used to match pg_sys::BuiltinOid
+    pub type_oid: pg_sys::Oid,
 }
 
 /// a struct into which to decode the thing
@@ -40,6 +50,7 @@ pub struct db721_Metadata {
     // add the other fields if you need them
 }
 
+#[derive(Clone, Debug)]
 pub struct Metadata{
     pub table: String,
 
@@ -208,21 +219,59 @@ impl Metadata{
 
         offsets.push(self.start_metadata);
 
-        for (column, columnData) in self.columns.iter() {
+        for (column, column_data) in self.columns.iter() {
             if filter.contains_key(column){
                 let Some(column_filter) = filter.get(column) else { todo!() };
-                for (block_index, stats) in columnData.block_stats.iter(){
-                    if inside(&stats, column_filter, &columnData.column_type) {
+                for (block_index, stats) in column_data.block_stats.iter(){
+                    if inside(&stats, column_filter, &column_data.column_type) {
                         blocks.push(block_index.to_string())
                     }
                 }
             }
-            offsets.push(columnData.start_offset)
+            offsets.push(column_data.start_offset)
         }
 
         let skip_blocks:HashSet<String> = HashSet::from_iter(blocks.iter().cloned());
         offsets.sort();
         return (skip_blocks, offsets)
+    }
+
+    // Continue here to package the columns in to the correct format so we can
+
+
+    pub fn tuples(&self, data: &HashMap<String, Vec<Datum>>, cols: Vec<ColumnMetadada>) -> Vec<Vec<Datum>>{
+        // Make tuples of it so we get then in 
+        // we need to make it correct. 
+        // let mut tuples= Vec::new();
+
+        // 1) Create the vector of the set length
+        // 2) Create a tuple in each position of length==nbr of columns
+        // 3) Populate the values correctly
+
+        log!("The number of columns are: {}, the number of columns in the schema are: {}", data.len(), cols.len());
+        let mut length = 0;
+        for (_key, val) in data.iter(){
+            if length == 0 {
+                length = val.len()
+            }
+            if length != val.len(){
+                log!("DIFFERENT LENGTH")
+            }
+            length = val.len()
+        }
+        log!("CONTINUE ON HERE 1");
+        // Initialize the array. 
+        let mut out = vec![vec![true.into_datum().unwrap(); cols.len()]; length];
+        log!("CONTINUE ON HERE 2");
+        for (tuple_idx, col) in cols.iter().enumerate(){
+            if let Some(val) = data.get(col.name.as_str()){
+                for (value_idx, v) in val.iter().enumerate(){
+                    out[value_idx][tuple_idx] = v.clone()
+                }
+            }
+        }
+        log!("CONTINUE ON HERE 3");
+    return out
     }
 
     pub fn filter(&self, filter:HashMap<String, Filter> ) -> HashMap<String, Vec<Datum>>{
@@ -235,11 +284,6 @@ impl Metadata{
         let mut f = File::open("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721").unwrap();
 
         println!("skip blocks {:#?}", skip_blocks);
-
-        // for the values we like to keep
-        // Map[Block]Map[Row]bit
-        let keep_value: HashMap<String, HashMap<String, i32>> = HashMap::new();
-
         // Make the vectors here and add to them in the end return the frame with the vectors takeing the ownershipt
         // seems easier!
 
@@ -264,25 +308,18 @@ impl Metadata{
                     log!("Skip block: {}", block_index);
                     continue;
                 }
-
-                // READ THE ACTUAL DATA
-
-                // WE DONT HANDLE STR CORRECT!!!!
-                // THIS IS AN ISSUE!!!!!
-                // WE DONT HANDLE THE LAST BYTES CORRECT!!!!
-
-                // Here we read the data lets figure our later how we filter the other rows efficiently
-                // Read the last 4 bytes to get the size of the metadata
                 let block_index:i32 = block_index.parse().unwrap();
                 let start:u64 = (column_data.start_offset +(block_index*self.max_values_per_block*4)).try_into().unwrap();
                 f.seek(SeekFrom::Start(start)).unwrap(); // We want the last 4 bytes
                 log!("The block: {}, the number of blocks: {}", block_index, column_data.num_blocks);
                 
-                let buffer = reader(&mut f, block_index, column_data, &offsets, self.max_values_per_block);
+                let (buffer, step_size) = reader(&mut f, block_index, column_data, &offsets, self.max_values_per_block);
 
                 // PARSE THE BUFFER TO BYTES
-                for i in (0..buffer.len()).step_by(4) {
+                for i in (0..buffer.len()).step_by(step_size.try_into().unwrap()) {
                     // only handle int now
+                    // we could reduce this branching here potentially .. 
+                    // Also the steps for str are 32 not 4 ... 
                     match column_data.column_type.as_str() {
                         "int" =>{
                             let val = LittleEndian::read_i32(&buffer[i..]);
@@ -330,14 +367,18 @@ impl Metadata{
                                     },
                                     FilterType::Or => (),
                                 }
-                                if let Some(d_val) =  val.into_datum(){
-                                    vector.push(d_val);
-                                }
                             } else {
                                 bit_map.push(true);
                             };
+                            if let Some(d_val) =  val.into_datum(){
+                                vector.push(d_val);
+                            }
                         }
-                        "str" =>(),
+                        "str" =>{
+                            let val = str::from_utf8(&buffer[i..i+32]).unwrap();
+                            bit_map.push(true);
+                            vector.push(val.into_datum().unwrap());
+                        },
                         _ => (),
                     }
                 }
@@ -373,7 +414,7 @@ impl Metadata{
 
 }
 
-fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i32>, max_values_per_block: i32) -> Vec<u8> {
+fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i32>, max_values_per_block: i32) -> (Vec<u8>, i32) {
     let multiple =  match column_data.column_type.as_str(){
         "int" => 4, 
         "float" => 4,
@@ -396,7 +437,7 @@ fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i
     log!("block_bytes: {}, total nbr of blocks: {}, max values: {}", block_bytes, column_data.num_blocks, max_values_per_block*multiple);
     f.read_exact(&mut buffer).unwrap();
     log!("IS THIS THE ISSUE 3");
-    return buffer;
+    return (buffer, multiple);
 }
 
 // take the filters as a list
