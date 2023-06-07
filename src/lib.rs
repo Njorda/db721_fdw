@@ -1,9 +1,10 @@
-use parser::db721::{Values, FilterType, ColumnMetadada};
+use parser::db721::{Values, FilterType, ColumnMetadada, Cell};
 use pgrx::*;
 use std::os::raw::c_int;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ptr;
+use std::str;
 use pgrx::{
     pg_sys::{self, Datum, Oid},
     FromDatum, IntoDatum, PgBuiltInOids, PgOid,
@@ -24,7 +25,8 @@ pub struct FdwState {
     nulls: Vec<bool>,
     tmp_ctx: PgMemoryContexts,
     cols: Vec<ColumnMetadada>,
-    tuples: Vec<Vec<Datum>>,
+    tuples: Vec<Vec<Cell>>,
+    row: Vec<Datum>, 
 }
 
 
@@ -39,6 +41,7 @@ impl FdwState {
             , val: Vec::<Datum>::new()
             , nulls: Vec::<bool>::new()
             , cols: Vec::new()
+            , row: Vec::new()
             , tmp_ctx: PgMemoryContexts::CurTransactionContext
             .switch_to(|_| PgMemoryContexts::new("Wrappers temp data")),
             tuples: Vec::new()
@@ -469,8 +472,8 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     // let state = (*node).fdw_state as *mut FdwState;
     let mut state: PgBox<FdwState> = PgBox::<FdwState>::from_pg((*node).fdw_state as _);
 
-    state.tmp_ctx.reset();
-    let mut old_ctx = state.tmp_ctx.set_as_current();
+    // state.tmp_ctx.reset();
+    // let mut old_ctx = state.tmp_ctx.set_as_current();
 
     // when this happens we will not load more data, we return one or multiple rows here as I understand
     // we want to limit how often we read the file so his will be relevant. 
@@ -488,12 +491,14 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
         (*state).tuples = meta.tuples(&data, (*state).cols.clone());
         (*state).nulls = vec![false; 7];
     }
-
-    (*slot).tts_values = (*state).tuples[0].as_mut_ptr();
+    let idx = (*state).rownum.clone();
+    log!("The values are {:?}", (*state).tuples[idx][1]);
+    let mut row:Vec<Datum> = (*state).tuples[idx].iter().map(|val| val.clone().into_datum().unwrap()).collect();
+    (*slot).tts_values = row.as_mut_ptr();
     (*slot).tts_isnull = state.nulls.as_mut_ptr();
     pg_sys::ExecStoreVirtualTuple(slot);
     state.rownum += 1;
-    old_ctx.set_as_current();
+    // old_ctx.set_as_current();
     return slot
 }
 

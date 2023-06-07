@@ -2,9 +2,10 @@ use std::{fs::File, io::{Read, Seek, SeekFrom}, str};
 use std::collections::{HashMap, HashSet};
 use pgrx::pg_sys::{self, Datum, Oid};
 use pgrx::*;
+use std::fmt;
 use serde::{Deserialize, Serialize};
 use byteorder::{ByteOrder, LittleEndian};
-use serde_json::{Value, Map, Number}; //https://stackoverflow.com/questions/39146584/how-do-i-create-a-rust-hashmap-where-the-value-can-be-one-of-multiple-types
+use serde_json::Value; //https://stackoverflow.com/questions/39146584/how-do-i-create-a-rust-hashmap-where-the-value-can-be-one-of-multiple-types
 
 
 // There will be one server, one wrapper and so on
@@ -37,7 +38,7 @@ pub struct ColumnMetadada {
 
 /// a struct into which to decode the thing
 #[derive(Serialize, Deserialize, Debug)]
-pub struct db721_Metadata {
+pub struct Db721Metadata {
     #[serde(rename = "Table")]
     pub table: String,
 
@@ -74,7 +75,7 @@ pub fn read_metadata(filename: String)-> Metadata {
     f.seek(SeekFrom::End(-i64::from(out)-4)).unwrap();
     let mut buffer = vec![0u8; out.try_into().unwrap()];
     f.read_exact(&mut buffer).unwrap();
-    let meta: db721_Metadata =  serde_json::from_slice(&buffer).unwrap();
+    let meta: Db721Metadata =  serde_json::from_slice(&buffer).unwrap();
     let file_length: i32 = f.metadata().unwrap().len().try_into().unwrap();
     let start_metadata =  file_length - i32::from(out)-4;
     return Metadata { table: meta.table, max_values_per_block: meta.max_values_per_block, columns: meta.columns, start_metadata: start_metadata}
@@ -239,7 +240,7 @@ impl Metadata{
     // Continue here to package the columns in to the correct format so we can
 
 
-    pub fn tuples(&self, data: &HashMap<String, Vec<Datum>>, cols: Vec<ColumnMetadada>) -> Vec<Vec<Datum>>{
+    pub fn tuples(&self, data: &HashMap<String, Vec<Cell>>, cols: Vec<ColumnMetadada>) -> Vec<Vec<Cell>>{
         // Make tuples of it so we get then in 
         // we need to make it correct. 
         // let mut tuples= Vec::new();
@@ -259,10 +260,7 @@ impl Metadata{
             }
             length = val.len()
         }
-        log!("CONTINUE ON HERE 1");
-        // Initialize the array. 
-        let mut out = vec![vec![true.into_datum().unwrap(); cols.len()]; length];
-        log!("CONTINUE ON HERE 2");
+        let mut out = vec![vec![Cell::Bool(true); cols.len()]; length];
         for (tuple_idx, col) in cols.iter().enumerate(){
             if let Some(val) = data.get(col.name.as_str()){
                 for (value_idx, v) in val.iter().enumerate(){
@@ -270,11 +268,10 @@ impl Metadata{
                 }
             }
         }
-        log!("CONTINUE ON HERE 3");
     return out
     }
 
-    pub fn filter(&self, filter:HashMap<String, Filter> ) -> HashMap<String, Vec<Datum>>{
+    pub fn filter(&self, filter:HashMap<String, Filter> ) -> HashMap<String, Vec<Cell>>{
 
         // Here we filter out which blocks are of interest
         // Predicate push down
@@ -294,12 +291,12 @@ impl Metadata{
         // Filter all the data
         // Pass the data out. 
 
-        let mut out:HashMap<String, Vec<Datum>> = HashMap::new();
+        let mut out:HashMap<String, Vec<Cell>> = HashMap::new();
         let mut bit_maps:HashMap<String, Vec<bool>> = HashMap::new();
         let mut bit_map:Vec<bool> = Vec::new();
 
         for (column, column_data) in self.columns.iter() {
-            let mut vector:Vec<Datum> = Vec::new();
+            let mut vector:Vec<Cell> = Vec::new();
             bit_map= Vec::new();
 
             for (block_index, _stats) in column_data.block_stats.iter(){
@@ -311,9 +308,9 @@ impl Metadata{
                 let block_index:i32 = block_index.parse().unwrap();
                 let start:u64 = (column_data.start_offset +(block_index*self.max_values_per_block*4)).try_into().unwrap();
                 f.seek(SeekFrom::Start(start)).unwrap(); // We want the last 4 bytes
-                log!("The block: {}, the number of blocks: {}", block_index, column_data.num_blocks);
                 
                 let (buffer, step_size) = reader(&mut f, block_index, column_data, &offsets, self.max_values_per_block);
+                log!("The block: {}, the number of blocks: {}, and step size: {}", block_index, column_data.num_blocks, step_size);
 
                 // PARSE THE BUFFER TO BYTES
                 for i in (0..buffer.len()).step_by(step_size.try_into().unwrap()) {
@@ -344,12 +341,10 @@ impl Metadata{
                             } else {
                                 bit_map.push(true);
                             };
-                            if let Some(d_val) =  val.into_datum(){
-                                vector.push(d_val);
-                            }
+                            vector.push(Cell::I32(val));
                         }
                         "float" =>{
-                            let val = LittleEndian::read_i32(&buffer[i..]);
+                            let val = LittleEndian::read_f32(&buffer[i..]);
                             if let Some(column_filter) = filter.get(column){
                                 match  column_filter.filter {
                                     FilterType::Equal => {
@@ -370,14 +365,12 @@ impl Metadata{
                             } else {
                                 bit_map.push(true);
                             };
-                            if let Some(d_val) =  val.into_datum(){
-                                vector.push(d_val);
-                            }
+                            vector.push(Cell::F32(val));
                         }
                         "str" =>{
-                            let val = str::from_utf8(&buffer[i..i+32]).unwrap();
+                            let val = str::from_utf8(&buffer[i..i+31]).unwrap();                            
                             bit_map.push(true);
-                            vector.push(val.into_datum().unwrap());
+                            vector.push(Cell::String(val.to_string()));
                         },
                         _ => (),
                     }
@@ -389,21 +382,21 @@ impl Metadata{
         }
 
         // Continue here with joining the bitmaps to one! 
-        for (k,v) in bit_maps.iter(){
+        for (_k,v) in bit_maps.iter(){
             bit_map = v
                 .iter()
                 .zip(v.iter())
                 .map(|(v, c)| if c | v { false } else { true })
                 .collect();
         }
-        let tmp: HashMap<String, Vec<Datum>> = HashMap::new();
-        for (k,v) in out.iter(){
-            let vals:Vec<Datum> = v.iter()
-            .zip(bit_map.iter().copied())
-            .filter(|(v,c)| c.clone())
-            .map(|(v, c)| *v)
-            .collect();
-        }
+        // let tmp: HashMap<String, Vec<Cell>> = HashMap::new();
+        // for (k,v) in out.iter(){
+        //     let vals:Vec<Cell> = v.iter()
+        //     .zip(bit_map.iter().copied())
+        //     .filter(|(v,c)| c.clone())
+        //     .map(|(v, c)| *v)
+        //     .collect();
+        // }
 
         // 2 read the data of interest
         println!("{:#?}", skip_blocks);
@@ -487,4 +480,136 @@ fn main() {
     // and then then we can start to build logic for strings and so on
     // we can use the length, the max mean and so on. 
 
+}
+
+
+
+
+/// A data cell in a data row
+#[derive(Debug)]
+pub enum Cell {
+    Bool(bool),
+    I8(i8),
+    I16(i16),
+    F32(f32),
+    I32(i32),
+    F64(f64),
+    I64(i64),
+    Numeric(AnyNumeric),
+    String(String),
+    Date(Date),
+    Timestamp(Timestamp),
+    Json(JsonB),
+}
+
+impl Clone for Cell {
+    fn clone(&self) -> Self {
+        match self {
+            Cell::Bool(v) => Cell::Bool(*v),
+            Cell::I8(v) => Cell::I8(*v),
+            Cell::I16(v) => Cell::I16(*v),
+            Cell::F32(v) => Cell::F32(*v),
+            Cell::I32(v) => Cell::I32(*v),
+            Cell::F64(v) => Cell::F64(*v),
+            Cell::I64(v) => Cell::I64(*v),
+            Cell::Numeric(v) => Cell::Numeric(v.clone()),
+            Cell::String(v) => Cell::String(v.clone()),
+            Cell::Date(v) => Cell::Date(v.clone()),
+            Cell::Timestamp(v) => Cell::Timestamp(v.clone()),
+            Cell::Json(v) => Cell::Json(JsonB(v.0.clone())),
+        }
+    }
+}
+
+impl fmt::Display for Cell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Cell::Bool(v) => write!(f, "{}", v),
+            Cell::I8(v) => write!(f, "{}", v),
+            Cell::I16(v) => write!(f, "{}", v),
+            Cell::F32(v) => write!(f, "{}", v),
+            Cell::I32(v) => write!(f, "{}", v),
+            Cell::F64(v) => write!(f, "{}", v),
+            Cell::I64(v) => write!(f, "{}", v),
+            Cell::Numeric(v) => write!(f, "{:?}", v),
+            Cell::String(v) => write!(f, "'{}'", v),
+            Cell::Date(v) => write!(f, "{:?}", v),
+            Cell::Timestamp(v) => write!(f, "{:?}", v),
+            Cell::Json(v) => write!(f, "{:?}", v),
+        }
+    }
+}
+
+impl IntoDatum for Cell {
+    fn into_datum(self) -> Option<Datum> {
+        match self {
+            Cell::Bool(v) => v.into_datum(),
+            Cell::I8(v) => v.into_datum(),
+            Cell::I16(v) => v.into_datum(),
+            Cell::F32(v) => v.into_datum(),
+            Cell::I32(v) => v.into_datum(),
+            Cell::F64(v) => v.into_datum(),
+            Cell::I64(v) => v.into_datum(),
+            Cell::Numeric(v) => v.into_datum(),
+            Cell::String(v) => v.into_datum(),
+            Cell::Date(v) => v.into_datum(),
+            Cell::Timestamp(v) => v.into_datum(),
+            Cell::Json(v) => v.into_datum(),
+        }
+    }
+
+    fn type_oid() -> Oid {
+       return Oid::type_oid();
+    }
+}
+
+impl FromDatum for Cell {
+    unsafe fn from_polymorphic_datum(datum: Datum, is_null: bool, typoid: Oid) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        if is_null {
+            return None;
+        }
+        let oid = PgOid::from(typoid);
+        match oid {
+            PgOid::BuiltIn(PgBuiltInOids::BOOLOID) => {
+                Some(Cell::Bool(bool::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::CHAROID) => {
+                Some(Cell::I8(i8::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::INT2OID) => {
+                Some(Cell::I16(i16::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::FLOAT4OID) => {
+                Some(Cell::F32(f32::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::INT4OID) => {
+                Some(Cell::I32(i32::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::FLOAT8OID) => {
+                Some(Cell::F64(f64::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::INT8OID) => {
+                Some(Cell::I64(i64::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::NUMERICOID) => {
+                Some(Cell::Numeric(AnyNumeric::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::TEXTOID) => {
+                Some(Cell::String(String::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::DATEOID) => {
+                Some(Cell::Date(Date::from_datum(datum, false).unwrap()))
+            }
+            PgOid::BuiltIn(PgBuiltInOids::TIMESTAMPOID) => Some(Cell::Timestamp(
+                Timestamp::from_datum(datum, false).unwrap(),
+            )),
+            PgOid::BuiltIn(PgBuiltInOids::JSONBOID) => {
+                Some(Cell::Json(JsonB::from_datum(datum, false).unwrap()))
+            }
+            _ => None,
+        }
+    }
 }
