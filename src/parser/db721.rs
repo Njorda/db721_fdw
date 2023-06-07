@@ -1,4 +1,4 @@
-use std::{fs::File, io::{Read, Seek, SeekFrom}, str};
+use std::{fs::File, io::{Read, Seek, SeekFrom}, str, ffi::CStr};
 use std::collections::{HashMap, HashSet};
 use pgrx::pg_sys::{self, Datum, Oid};
 use pgrx::*;
@@ -217,7 +217,6 @@ impl Metadata{
 
         let mut blocks = Vec::<String>::new();
         let mut offsets = Vec::<i32>::new();
-
         offsets.push(self.start_metadata);
 
         for (column, column_data) in self.columns.iter() {
@@ -231,20 +230,15 @@ impl Metadata{
             }
             offsets.push(column_data.start_offset)
         }
-
         let skip_blocks:HashSet<String> = HashSet::from_iter(blocks.iter().cloned());
         offsets.sort();
         return (skip_blocks, offsets)
     }
 
-    // Continue here to package the columns in to the correct format so we can
-
-
-    pub fn tuples(&self, data: &HashMap<String, Vec<Cell>>, cols: Vec<ColumnMetadada>) -> Vec<Vec<Cell>>{
+    pub fn tuples(&self, data: &HashMap<String, Vec<Cell>>, cols: Vec<ColumnMetadada>) -> (Vec<Vec<Cell>>, Vec<Vec<bool>>){
         // Make tuples of it so we get then in 
         // we need to make it correct. 
         // let mut tuples= Vec::new();
-
         // 1) Create the vector of the set length
         // 2) Create a tuple in each position of length==nbr of columns
         // 3) Populate the values correctly
@@ -252,6 +246,7 @@ impl Metadata{
         log!("The number of columns are: {}, the number of columns in the schema are: {}", data.len(), cols.len());
         let mut length = 0;
         for (_key, val) in data.iter(){
+            log!("The lengths of {} is: {}", _key, val.len());
             if length == 0 {
                 length = val.len()
             }
@@ -260,15 +255,25 @@ impl Metadata{
             }
             length = val.len()
         }
-        let mut out = vec![vec![Cell::Bool(true); cols.len()]; length];
-        for (tuple_idx, col) in cols.iter().enumerate(){
+        // I need to have a bitmask here as well...
+        // Fix this current magic 7 to be from software code ...
+        let mut out = vec![vec![Cell::Bool(true); 7]; length];
+        let mut mask  = vec![vec![true; data.len()]; length];
+        // This is the issue.
+        // This is the issue.
+        // Continue here, need to know the place of the att nbr
+        // This is key to how it is done
+
+        for col in cols.iter(){
             if let Some(val) = data.get(col.name.as_str()){
                 for (value_idx, v) in val.iter().enumerate(){
-                    out[value_idx][tuple_idx] = v.clone()
+                    // THIS IS NOT CORRECT
+                    out[value_idx][col.num-1] = v.clone();
+                    mask[value_idx][col.num-1] = false;
                 }
             }
         }
-    return out
+    return (out, mask)
     }
 
     pub fn filter(&self, filter:HashMap<String, Filter> ) -> HashMap<String, Vec<Cell>>{

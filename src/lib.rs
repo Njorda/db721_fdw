@@ -22,7 +22,7 @@ pub struct FdwState {
     metadata: Option<Metadata>, 
     filters: HashMap<String, Filter>,
     val: Vec<Datum>,
-    nulls: Vec<bool>,
+    nulls: Vec<Vec<bool>>,
     tmp_ctx: PgMemoryContexts,
     cols: Vec<ColumnMetadada>,
     tuples: Vec<Vec<Cell>>,
@@ -39,7 +39,7 @@ impl FdwState {
             , metadata: None
             , filters: HashMap::new()
             , val: Vec::<Datum>::new()
-            , nulls: Vec::<bool>::new()
+            , nulls: Vec::new()
             , cols: Vec::new()
             , row: Vec::new()
             , tmp_ctx: PgMemoryContexts::CurTransactionContext
@@ -327,9 +327,9 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         let attname = pg_sys::get_attname((*rte).relid, attno, true);
         if !attname.is_null() {
             // generated column is not supported
-            if pg_sys::get_attgenerated((*rte).relid, attno) > 0 {                continue;
+            if pg_sys::get_attgenerated((*rte).relid, attno) > 0 {
+                continue;
             }
-
             let type_oid = pg_sys::get_atttype((*rte).relid, attno);
             cols.push(ColumnMetadada {
                 name: CStr::from_ptr(attname).to_str().unwrap().to_owned(),
@@ -343,7 +343,6 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
     state.cols = cols;
     state.opts = ret; 
     state.filters = filters;
-    
     // Continue here , maybe as _ is enough ... 
     (*baserel).fdw_private = state.into_pg() as *mut std::ffi::c_void;
 
@@ -456,7 +455,6 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     state
         .val
         .extend_from_slice(&vec![0.into_datum().unwrap(); natts]);
-    state.nulls.extend_from_slice(&vec![true; natts]);
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
 }
 
@@ -472,8 +470,8 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     // let state = (*node).fdw_state as *mut FdwState;
     let mut state: PgBox<FdwState> = PgBox::<FdwState>::from_pg((*node).fdw_state as _);
 
-    // state.tmp_ctx.reset();
-    // let mut old_ctx = state.tmp_ctx.set_as_current();
+    state.tmp_ctx.reset();
+    let mut old_ctx = state.tmp_ctx.set_as_current();
 
     // when this happens we will not load more data, we return one or multiple rows here as I understand
     // we want to limit how often we read the file so his will be relevant. 
@@ -488,17 +486,22 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
         let meta = (*state).metadata.clone().unwrap();
         let filters = &(*state).filters;
         let data = meta.filter(filters.clone());
-        (*state).tuples = meta.tuples(&data, (*state).cols.clone());
-        (*state).nulls = vec![false; 7];
+        let (values, mask) = meta.tuples(&data, (*state).cols.clone());
+        (*state).tuples = values;
+        (*state).nulls = mask;
+
     }
     let idx = (*state).rownum.clone();
-    log!("The values are {:?}", (*state).tuples[idx][1]);
     let mut row:Vec<Datum> = (*state).tuples[idx].iter().map(|val| val.clone().into_datum().unwrap()).collect();
+    log!("The row length is: {}", row.len());
+    log!("The nulls: {:?}", (*state).nulls[idx]);
+    log!("The values: {:?}", (*state).tuples[idx]);
     (*slot).tts_values = row.as_mut_ptr();
-    (*slot).tts_isnull = state.nulls.as_mut_ptr();
+    (*slot).tts_isnull = (*state).nulls[idx].as_mut_ptr();
     pg_sys::ExecStoreVirtualTuple(slot);
     state.rownum += 1;
-    // old_ctx.set_as_current();
+    old_ctx.set_as_current();
+    log!("HERE WE GO");
     return slot
 }
 
