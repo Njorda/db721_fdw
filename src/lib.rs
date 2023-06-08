@@ -26,7 +26,7 @@ pub struct FdwState {
     tmp_ctx: PgMemoryContexts,
     cols: Vec<ColumnMetadada>,
     tuples: Vec<Vec<Cell>>,
-    row: Vec<Datum>, 
+    natts: usize, 
 }
 
 
@@ -41,7 +41,7 @@ impl FdwState {
             , val: Vec::<Datum>::new()
             , nulls: Vec::new()
             , cols: Vec::new()
-            , row: Vec::new()
+            , natts: 0
             , tmp_ctx: PgMemoryContexts::CurTransactionContext
             .switch_to(|_| PgMemoryContexts::new("Wrappers temp data")),
             tuples: Vec::new()
@@ -330,6 +330,7 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
             if pg_sys::get_attgenerated((*rte).relid, attno) > 0 {
                 continue;
             }
+
             let type_oid = pg_sys::get_atttype((*rte).relid, attno);
             cols.push(ColumnMetadada {
                 name: CStr::from_ptr(attname).to_str().unwrap().to_owned(),
@@ -345,7 +346,6 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
     state.filters = filters;
     // Continue here , maybe as _ is enough ... 
     (*baserel).fdw_private = state.into_pg() as *mut std::ffi::c_void;
-
     // Print all the options here and if they are expected and so on. 
 
 }
@@ -452,9 +452,8 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     let rel = scan_state.ss_currentRelation;
     let tup_desc = (*rel).rd_att;
     let natts = (*tup_desc).natts as usize;
-    state
-        .val
-        .extend_from_slice(&vec![0.into_datum().unwrap(); natts]);
+    
+    state.natts = natts;
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
 }
 
@@ -486,7 +485,7 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
         let meta = (*state).metadata.clone().unwrap();
         let filters = &(*state).filters;
         let data = meta.filter(filters.clone());
-        let (values, mask) = meta.tuples(&data, (*state).cols.clone());
+        let (values, mask) = meta.tuples(&data, (*state).cols.clone(), state.natts);
         (*state).tuples = values;
         (*state).nulls = mask;
 

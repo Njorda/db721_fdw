@@ -211,8 +211,6 @@ impl Metadata{
     pub fn block(&self) -> i32{
         return self.max_values_per_block.clone()
     }
-
-
     pub fn block_filter(&self, filter:&HashMap<String, Filter> ) -> (HashSet<String>,  Vec<i32>) {
 
         let mut blocks = Vec::<String>::new();
@@ -235,14 +233,13 @@ impl Metadata{
         return (skip_blocks, offsets)
     }
 
-    pub fn tuples(&self, data: &HashMap<String, Vec<Cell>>, cols: Vec<ColumnMetadada>) -> (Vec<Vec<Cell>>, Vec<Vec<bool>>){
+    pub fn tuples(&self, data: &HashMap<String, Vec<Cell>>, cols: Vec<ColumnMetadada>, natts: usize) -> (Vec<Vec<Cell>>, Vec<Vec<bool>>){
         // Make tuples of it so we get then in 
         // we need to make it correct. 
         // let mut tuples= Vec::new();
         // 1) Create the vector of the set length
         // 2) Create a tuple in each position of length==nbr of columns
         // 3) Populate the values correctly
-
         log!("The number of columns are: {}, the number of columns in the schema are: {}", data.len(), cols.len());
         let mut length = 0;
         for (_key, val) in data.iter(){
@@ -257,13 +254,14 @@ impl Metadata{
         }
         // I need to have a bitmask here as well...
         // Fix this current magic 7 to be from software code ...
-        let mut out = vec![vec![Cell::Bool(true); 7]; length];
+        // begin_foreign_scan in wrappers they show how to do this. 
+        // This will be the longest blog post eeeeveeerrr
+        let mut out = vec![vec![Cell::Bool(true); natts]; length];
         let mut mask  = vec![vec![true; data.len()]; length];
         // This is the issue.
         // This is the issue.
         // Continue here, need to know the place of the att nbr
         // This is key to how it is done
-
         for col in cols.iter(){
             if let Some(val) = data.get(col.name.as_str()){
                 for (value_idx, v) in val.iter().enumerate(){
