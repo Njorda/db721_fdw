@@ -81,14 +81,6 @@ pub fn read_metadata(filename: String)-> Metadata {
     return Metadata { table: meta.table, max_values_per_block: meta.max_values_per_block, columns: meta.columns, start_metadata: start_metadata}
 }
 
-// Should we return the data out in the format here using some? Lets first define exactly two columns :) 
-#[derive(Debug)]
-// This one needs to become generic it can not be a static type as we have here since it will vary between. 
-pub struct Frame{
-    pub WeightG: Option<Vec<i32>>,
-    pub AgeWeeks: Option<Vec<i32>>,
-    pub Identifier: Option<Vec<i32>>
-}
 #[derive(Debug, PartialEq, Clone)]
 pub enum FilterType{
     Greater,
@@ -113,6 +105,9 @@ pub struct Filter {
 
 
 fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) -> bool {
+    log!("The data type: {}", data_type.as_str());
+    log!("The filter is: {:?}, the value is: {:?}", filter.filter, filter.value);
+    // check all the conditions
     match data_type.as_str() {
         "int" => {
             match filter.filter {
@@ -122,7 +117,7 @@ fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) ->
                         Some(block_min) => {
                                 if let Some(block_min) =  block_min.as_i64(){
                                     if Values::Int(block_min) > filter.value{ 
-                                        return false
+                                        return true
                                     }
                                 else{}
                             } 
@@ -133,7 +128,7 @@ fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) ->
                         Some(block_max) => {
                                 if let Some(block_max) =  block_max.as_i64(){
                                     if Values::Int(block_max) < filter.value{
-                                        return false
+                                        return true
                                     }
                                 else{}
                             } 
@@ -144,9 +139,11 @@ fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) ->
                     match stats.get("max") {
                         None => (),
                         Some(block_max) => {
+                            log!("Greater than ...");
                                 if let Some(block_max) =  block_max.as_i64(){
                                     if Values::Int(block_max) <= filter.value{
-                                        return false
+                                        log!("False it is ...");
+                                        return true
                                     }
                                 else{}
                             } 
@@ -159,7 +156,7 @@ fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) ->
                         Some(block_min) => {
                                 if let Some(block_min) =  block_min.as_i64(){
                                     if Values::Int(block_min) >= filter.value{
-                                        return false
+                                        return true
                                     }
                                 else{}
                             } 
@@ -170,8 +167,60 @@ fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) ->
 
             }
         },
-        "float" => (),
-        "string" => (),
+        "float" | "real" => match filter.filter {
+            FilterType::Equal => {
+                match stats.get("min") {
+                    None => (),
+                    Some(block_min) => {
+                            if let Some(block_min) =  block_min.as_f64(){
+                                if Values::Float(block_min) > filter.value{ 
+                                    return true
+                                }
+                            else{}
+                        } 
+                    },
+                }
+                match stats.get("max") {
+                    None => (),
+                    Some(block_max) => {
+                            if let Some(block_max) =  block_max.as_f64(){
+                                if Values::Float(block_max) < filter.value{
+                                    return true
+                                }
+                            else{}
+                        } 
+                    },
+                }
+            },
+            FilterType::Greater => {
+                match stats.get("max") {
+                    None => (),
+                    Some(block_max) => {
+                            if let Some(block_max) =  block_max.as_f64(){
+                                if Values::Float(block_max) <= filter.value{
+                                    return true
+                                }
+                            else{}
+                        } 
+                    },
+                }
+            }
+            FilterType::Less  => {
+                match stats.get("min") {
+                    None => (),
+                    Some(block_min) => {
+                            if let Some(block_min) =  block_min.as_f64(){
+                                if Values::Float(block_min) >= filter.value{
+                                    return true
+                                }
+                            else{}
+                        } 
+                    },
+                }
+            },
+            FilterType::Or  => (),
+        },
+        "VARCHAR" | "TEXT"  => {},
         "str" => (),
         _ => panic!("unknown type: {}", data_type)
 
@@ -190,7 +239,7 @@ fn inside(stats: &HashMap<String,Value>, filter: &Filter, data_type: &String) ->
 // Then we have the logic, get from the filter as well, strings will be very different here, might be faaaast if we check length of it as well! 
 
 
-    return true
+    return false
 }
 
 
@@ -257,7 +306,7 @@ impl Metadata{
         // begin_foreign_scan in wrappers they show how to do this. 
         // This will be the longest blog post eeeeveeerrr
         let mut out = vec![vec![Cell::Bool(true); natts]; length];
-        let mut mask  = vec![vec![true; data.len()]; length];
+        let mut mask  = vec![vec![true; natts]; length];
         // This is the issue.
         // This is the issue.
         // Continue here, need to know the place of the att nbr
@@ -274,7 +323,7 @@ impl Metadata{
     return (out, mask)
     }
 
-    pub fn filter(&self, filter:HashMap<String, Filter> ) -> HashMap<String, Vec<Cell>>{
+    pub fn filter(&self, filter:HashMap<String, Filter> , cols: &Vec<ColumnMetadada>) -> HashMap<String, Vec<Cell>>{
 
         // Here we filter out which blocks are of interest
         // Predicate push down
@@ -282,8 +331,6 @@ impl Metadata{
 
         // Here we start to read the data, 
         let mut f = File::open("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721").unwrap();
-
-        println!("skip blocks {:#?}", skip_blocks);
         // Make the vectors here and add to them in the end return the frame with the vectors takeing the ownershipt
         // seems easier!
 
@@ -295,17 +342,13 @@ impl Metadata{
         // Pass the data out. 
 
         let mut out:HashMap<String, Vec<Cell>> = HashMap::new();
-        let mut bit_maps:HashMap<String, Vec<bool>> = HashMap::new();
-        let mut bit_map:Vec<bool> = Vec::new();
+        for col in cols.iter() {
+            let column_data = self.columns.get(&col.name).unwrap();
 
-        for (column, column_data) in self.columns.iter() {
             let mut vector:Vec<Cell> = Vec::new();
-            bit_map= Vec::new();
 
             for (block_index, _stats) in column_data.block_stats.iter(){
-                log!("Start block: {}",block_index );
                 if skip_blocks.contains(block_index){
-                    log!("Skip block: {}", block_index);
                     continue;
                 }
                 let block_index:i32 = block_index.parse().unwrap();
@@ -323,56 +366,14 @@ impl Metadata{
                     match column_data.column_type.as_str() {
                         "int" =>{
                             let val = LittleEndian::read_i32(&buffer[i..]);
-                            if let Some(column_filter) = filter.get(column){
-                                // this is for the bitmap stuff
-                                match  column_filter.filter {
-                                    FilterType::Equal => {
-                                        if Values::Int(val as _) == column_filter.value{ 
-                                            bit_map.push(false);
-                                        }
-                                    },
-                                    FilterType::Greater => 
-                                        if Values::Int(val as _) <= column_filter.value{ 
-                                            bit_map.push(false);
-                                        },
-                                    FilterType::Less =>                                     
-                                        if Values::Int(val as _) >= column_filter.value{ 
-                                            bit_map.push(false);
-                                    },
-                                    FilterType::Or => (),
-                                }
-                            } else {
-                                bit_map.push(true);
-                            };
                             vector.push(Cell::I32(val));
                         }
                         "float" =>{
                             let val = LittleEndian::read_f32(&buffer[i..]);
-                            if let Some(column_filter) = filter.get(column){
-                                match  column_filter.filter {
-                                    FilterType::Equal => {
-                                        if Values::Float(val as _) == column_filter.value{ 
-                                            bit_map.push(false);
-                                        }
-                                    },
-                                    FilterType::Greater => 
-                                        if Values::Float(val as _) <= column_filter.value{ 
-                                            bit_map.push(false);
-                                        },
-                                    FilterType::Less =>                                     
-                                        if Values::Float(val as _) >= column_filter.value{ 
-                                            bit_map.push(false);
-                                    },
-                                    FilterType::Or => (),
-                                }
-                            } else {
-                                bit_map.push(true);
-                            };
                             vector.push(Cell::F32(val));
                         }
                         "str" =>{
                             let val = str::from_utf8(&buffer[i..i+31]).unwrap();                            
-                            bit_map.push(true);
                             vector.push(Cell::String(val.to_string()));
                         },
                         _ => (),
@@ -380,30 +381,8 @@ impl Metadata{
                 }
                 // here we need to apply the filters and keep this for the other columns ...
             }
-            out.insert(column.to_string(), vector);
-            bit_maps.insert(column.to_string(), bit_map.clone());
+            out.insert(col.name.to_string(), vector);
         }
-
-        // Continue here with joining the bitmaps to one! 
-        for (_k,v) in bit_maps.iter(){
-            bit_map = v
-                .iter()
-                .zip(v.iter())
-                .map(|(v, c)| if c | v { false } else { true })
-                .collect();
-        }
-        // let tmp: HashMap<String, Vec<Cell>> = HashMap::new();
-        // for (k,v) in out.iter(){
-        //     let vals:Vec<Cell> = v.iter()
-        //     .zip(bit_map.iter().copied())
-        //     .filter(|(v,c)| c.clone())
-        //     .map(|(v, c)| *v)
-        //     .collect();
-        // }
-
-        // 2 read the data of interest
-        println!("{:#?}", skip_blocks);
-        println!("{:#?}", out.len());
         return out
     }
 
@@ -420,7 +399,6 @@ fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i
 
     let block_bytes = if block_index == (column_data.num_blocks-1){ 
             log!("Inside the check, offset: {:?}, first after: {}", offsets, &column_data.start_offset);
-
             // CHECK HERE IF NONE use end of the blocks(remove the meta data and so on)
             // Continue here
             let block_bytes = first_after(&offsets,&column_data.start_offset).unwrap();
@@ -430,9 +408,7 @@ fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i
     };
 
     let mut buffer = vec![0u8; block_bytes.try_into().unwrap()];
-    log!("block_bytes: {}, total nbr of blocks: {}, max values: {}", block_bytes, column_data.num_blocks, max_values_per_block*multiple);
     f.read_exact(&mut buffer).unwrap();
-    log!("IS THIS THE ISSUE 3");
     return (buffer, multiple);
 }
 
@@ -443,47 +419,6 @@ fn reader(f: &mut File, block_index: i32, column_data: &Columns, offsets: &Vec<i
 // Then start to separate out the code more and more I guess. 
 // How do I want to structure it now ...
 
-
-
-fn main() {
-    println!("Hello World!");
-    let meta= read_metadata("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721".to_string());
-    println!("{}", meta.table);
-    for (column, value) in meta.columns.iter() {
-        println!("the column is: {}, the start offset is: {}, nbr blocks {}", column, value.start_offset, value.num_blocks);
-        for (block_index, stats) in value.block_stats.iter(){
-            println!("The block is: {} data type: {}", block_index, value.column_type);
-            for (key, values) in stats.into_iter(){
-                let val = value.column_type.as_str();
-                let column_type: Vec<&str> = val.split(" / ").collect();
-                let vals = column_type[0];
-                match vals{
-                "str"=>println!("str:{} {:#?}", key, values.as_str()),
-                "int"=>println!("int:{} {:#?}", key, values.as_i64()),
-                "float"=>println!("float:{} {:#?}", key, values.as_f64()),
-                &_ => println!("Not handled")
-                }
-            }
-        }
-        break;
-    }
-    println!("number of blocks: {}", meta.max_values_per_block);
-    println!("Here we go {}", meta.block());
-    let filter = Filter{
-        column: "identifier".to_string(),
-        filter: FilterType::Equal,
-        value: Values::Int(10),
-    };
-    let mut mappy: HashMap<String, Filter> = HashMap::new();
-    mappy.insert("identifier".to_string(), filter);
-    println!("{:?}", Some(meta.filter(mappy)));
-
-
-    // next step is to further understand the format of the blocks.
-    // and then then we can start to build logic for strings and so on
-    // we can use the length, the max mean and so on. 
-
-}
 
 
 

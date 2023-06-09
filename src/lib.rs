@@ -461,7 +461,6 @@ unsafe extern "C" fn hello_begin_foreign_scan(
 unsafe extern "C" fn hello_iterate_foreign_scan(
     node: *mut pg_sys::ForeignScanState,
 ) -> *mut pg_sys::TupleTableSlot {
-    log!("stuff");
     let slot = (*node).ss.ss_ScanTupleSlot;
     if let Some(clear) = (*(*slot).tts_ops).clear {
         clear(slot);
@@ -474,33 +473,28 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
 
     // when this happens we will not load more data, we return one or multiple rows here as I understand
     // we want to limit how often we read the file so his will be relevant. 
-    if (*state).rownum > 10 { // https://www.highgo.ca/2021/09/03/implement-foreign-scan-with-fdw-interface-api/
-        (*(*slot).tts_ops).clear.expect("missing")(slot);
-        return slot;
-    }
-
-    log!("WE ARE HERE");
 
     if (*state).rownum == 0 {
         let meta = (*state).metadata.clone().unwrap();
         let filters = &(*state).filters;
-        let data = meta.filter(filters.clone());
+        let data = meta.filter(filters.clone(), &state.cols);
         let (values, mask) = meta.tuples(&data, (*state).cols.clone(), state.natts);
         (*state).tuples = values;
         (*state).nulls = mask;
-
     }
+
+    if (*state).rownum >= (*state).tuples.len()   { // https://www.highgo.ca/2021/09/03/implement-foreign-scan-with-fdw-interface-api/
+        (*(*slot).tts_ops).clear.expect("missing")(slot);
+        return slot;
+    }
+
     let idx = (*state).rownum.clone();
     let mut row:Vec<Datum> = (*state).tuples[idx].iter().map(|val| val.clone().into_datum().unwrap()).collect();
-    log!("The row length is: {}", row.len());
-    log!("The nulls: {:?}", (*state).nulls[idx]);
-    log!("The values: {:?}", (*state).tuples[idx]);
     (*slot).tts_values = row.as_mut_ptr();
     (*slot).tts_isnull = (*state).nulls[idx].as_mut_ptr();
     pg_sys::ExecStoreVirtualTuple(slot);
     state.rownum += 1;
     old_ctx.set_as_current();
-    log!("HERE WE GO");
     return slot
 }
 
