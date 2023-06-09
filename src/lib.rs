@@ -21,7 +21,6 @@ pub struct FdwState {
     opts: HashMap<String, String>,
     metadata: Option<Metadata>, 
     filters: HashMap<String, Filter>,
-    val: Vec<Datum>,
     nulls: Vec<Vec<bool>>,
     tmp_ctx: PgMemoryContexts,
     cols: Vec<ColumnMetadada>,
@@ -38,7 +37,6 @@ impl FdwState {
             , opts: HashMap::new()
             , metadata: None
             , filters: HashMap::new()
-            , val: Vec::<Datum>::new()
             , nulls: Vec::new()
             , cols: Vec::new()
             , natts: 0
@@ -69,12 +67,12 @@ unsafe fn db721_fdw_handler() -> fdw_handler {
         pgrx::PgBox::<pg_sys::FdwRoutine>::alloc_node(pg_sys::NodeTag_T_FdwRoutine);
 
     // Set callback functions.
-    fdwroutine.GetForeignRelSize = Some(hello_get_foreign_rel_size);
-    fdwroutine.GetForeignPaths = Some(hello_get_foreign_paths);
-    fdwroutine.GetForeignPlan = Some(hello_get_foreign_plan);
+    fdwroutine.GetForeignRelSize = Some(get_foreign_rel_size);
+    fdwroutine.GetForeignPaths = Some(get_foreign_paths);
+    fdwroutine.GetForeignPlan = Some(get_foreign_plan);
     fdwroutine.ExplainForeignScan = Some(hello_explain_foreign_scan);
-    fdwroutine.BeginForeignScan = Some(hello_begin_foreign_scan);
-    fdwroutine.IterateForeignScan = Some(hello_iterate_foreign_scan);
+    fdwroutine.BeginForeignScan = Some(begin_foreign_scan);
+    fdwroutine.IterateForeignScan = Some(iterate_foreign_scan);
     fdwroutine.ReScanForeignScan = Some(hello_re_scan_foreign_scan);
     fdwroutine.EndForeignScan = Some(hello_end_foreign_scan);
     fdwroutine.AnalyzeForeignTable = Some(hello_analyze_foreign_table);
@@ -246,18 +244,8 @@ pub(crate) unsafe fn get_operator(opno: pg_sys::Oid) -> pg_sys::Form_pg_operator
     op
 }
 
-pub(crate) unsafe fn unnest_clause(node: *mut pg_sys::Node) -> *mut pg_sys::Node {
-    if is_a(node, pg_sys::NodeTag_T_RelabelType) {
-        (*(node as *mut pg_sys::RelabelType)).arg as _
-    } else if is_a(node, pg_sys::NodeTag_T_ArrayCoerceExpr) {
-        (*(node as *mut pg_sys::ArrayCoerceExpr)).arg as _
-    } else {
-        node
-    }
-}
-
 #[pg_guard]
-unsafe extern "C" fn hello_get_foreign_rel_size(
+unsafe extern "C" fn get_foreign_rel_size(
     root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     foreigntableid: pg_sys::Oid,
@@ -267,17 +255,22 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
     (*baserel).rows = 10.0;
     (*baserel).fdw_private = std::ptr::null_mut();
 
-    // Allocate a box with the memory, zero initiallize it now. 
+    // Allocate a box of memory in postrgress for the  FdwState
     let mut state = pgrx::PgBox::<FdwState>::alloc0();
 
-    // Here we start to handle the conditions
+    // Get information about the conditions of the query
     let conds = PgList::<pg_sys::RestrictInfo>::from_pg((*baserel).baserestrictinfo);
+    // Create a hashmap to store the conditions per column
     let mut filters:HashMap<String, Filter> = HashMap::new();
     for cond in conds.iter_ptr() {
         let expr = (*cond).clause as *mut pg_sys::Node;
+        // Check that the node is of the type, OpExpr(xpression that uses an operator to compare one or two values of a given type)
         if is_a(expr, pg_sys::NodeTag_T_OpExpr) {
+            // Get the operator type and the values of the operation
             let filter = extract_from_op_expr(root, foreigntableid, (*baserel).relids, expr as _);
+            // Handle empty since we have an optional
             if let Some(filter) = filter{
+                // Add filter condition
                 filters.insert(filter.column.clone(),filter);
             }
         } else {
@@ -285,30 +278,41 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         };
     }
 
-    // Here we handled the options
+    // Handle the foreign data wrapper arguments. First step is to initialize the hash map for all the options
     let mut ret = HashMap::new();
+    // Get the foreign table based upon the id
     let ftable = pg_sys::GetForeignTable(foreigntableid);
+    // Fetch the options as a list from postgres
     let options: PgList<pg_sys::DefElem> = PgList::from_pg((*ftable).options);
+    // Loop over the options to collect them one at a time. 
     for option in options.iter_ptr() {
         let name = CStr::from_ptr((*option).defname);
         let value = CStr::from_ptr(pg_sys::defGetString(option));
+        // Insert in to the hash map to store each of them. 
         ret.insert(
             name.to_str().unwrap().to_owned(),
             value.to_str().unwrap().to_owned(),
         );
     }
 
+    // Since we are relying on the option "filename" for the file we check this specifically
     if ret.contains_key("filename"){
         let Some(filename) = ret.get("filename") else {todo!()};
+        // We store the filename as metadata.
         state.metadata = Some(read_metadata(filename.to_string()));
         log!("Metadata is set");
     }
 
 
-    let mut col_vars: *mut pg_sys::List = ptr::null_mut();
-
-    // Here we handle which columns where selected
+    // Handle the selected columns
     let mut cols = Vec::new();
+    // Create list mut pointer to list where we can store the selected columns
+    let mut col_vars: *mut pg_sys::List = ptr::null_mut();
+    // This is based upon: 
+    // baserel->reltarget->exprs can be used to determine which columns need to be fetched.
+    // But note that it only lists columns that have to be emitted by the ForeignScan plan node
+    // not columns that are used in qual evaluation but not output by the query. However we leave this
+    // for postgres to handle and not the FDW in this case(except for on the block level). 
     let tgt_list: PgList<pg_sys::Node> = PgList::from_pg((*(*baserel).reltarget).exprs);
     for tgt in tgt_list.iter_ptr() {
         let tgt_cols = pg_sys::pull_var_clause(
@@ -320,18 +324,26 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         col_vars = pg_sys::list_union(col_vars, tgt_cols);
     }
 
+    // Reformating, not sure why this is needed to be honest
     let col_vars: PgList<pg_sys::Var> = PgList::from_pg(col_vars);
+    // Loop over the pointers and get the variable information
     for var in col_vars.iter_ptr() {
+        // Range table entry is the statement given after the from. 
         let rte = pg_sys::planner_rt_fetch((*var).varno as u32, root);
+        // The attno states the position a value should have in the tuples we return, based upon the statement. 
         let attno = (*var).varattno;
+        // The attribute name
         let attname = pg_sys::get_attname((*rte).relid, attno, true);
+        // Check that the attribute name is null, not sure why this could happen though ...
         if !attname.is_null() {
             // generated column is not supported
             if pg_sys::get_attgenerated((*rte).relid, attno) > 0 {
                 continue;
             }
-
+            
+            // Object identifiers (OIDs) are used internally by PostgreSQL as primary keys for various system tables.
             let type_oid = pg_sys::get_atttype((*rte).relid, attno);
+            // Adding the column type
             cols.push(ColumnMetadada {
                 name: CStr::from_ptr(attname).to_str().unwrap().to_owned(),
                 num: attno as usize,
@@ -340,24 +352,31 @@ unsafe extern "C" fn hello_get_foreign_rel_size(
         }
     }
 
-    log!("The columns are: {:?}", cols);
     state.cols = cols;
     state.opts = ret; 
     state.filters = filters;
-    // Continue here , maybe as _ is enough ... 
+    // baserel->fdw_private is a void pointer that is available for FDW planning functions to store information
+    // relevant to the particular foreign table. The core planner does not touch it except to initialize it to NULL 
+    // when the RelOptInfo node is created. It is useful for passing information forward from GetForeignRelSize to 
+    //GetForeignPaths and/or GetForeignPaths to GetForeignPlan, thereby avoiding recalculation.
     (*baserel).fdw_private = state.into_pg() as *mut std::ffi::c_void;
-    // Print all the options here and if they are expected and so on. 
-
 }
 
 
 #[pg_guard]
-unsafe extern "C" fn hello_get_foreign_paths(
+unsafe extern "C" fn get_foreign_paths(
     root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     _foreigntableid: pg_sys::Oid,
 ) {
     debug1!("HelloFdw: hello_get_foreign_paths");
+    //This function must generate at least one access path (ForeignPath node) for a scan on the foreign table and 
+    // must call add_path to add each such path to baserel->pathlist. It's recommended to use create_foreignscan_path 
+    // to build the ForeignPath nodes. The function can generate multiple access paths, e.g., a path which has valid 
+    // pathkeys to represent a pre-sorted result. Each access path must contain cost estimates, and can contain any 
+    // FDW-private information that is needed to identify the specific scan method intended.
+    // We generate only one path in this case, with a dummy cost value(will not matter since there is only one
+    // if multiple the cheapest one would be selected).
     pg_sys::add_path(
         baserel,
         create_foreignscan_path(
@@ -375,7 +394,8 @@ unsafe extern "C" fn hello_get_foreign_paths(
     )
 }
 
-unsafe extern "C" fn hello_get_foreign_plan(
+
+unsafe extern "C" fn get_foreign_plan(
     _root: *mut pg_sys::PlannerInfo,
     baserel: *mut pg_sys::RelOptInfo,
     _foreigntableid: pg_sys::Oid,
@@ -388,9 +408,10 @@ unsafe extern "C" fn hello_get_foreign_plan(
 
     let state = PgBox::<FdwState>::from_pg((*baserel).fdw_private as _);
 
+    // Generate the forigenscan based upon the best path, in this case there will only be one, so there is no best, 
+    // based upon the get_foreign_paths.
     // This is needed in order to pass on the filters. 
     scan_clauses = pg_sys::extract_actual_clauses(scan_clauses, false);
-
     let mut ret = PgList::new();
     let val = state.into_pg() as i64;
     let cst = pg_sys::makeConst(
@@ -422,14 +443,14 @@ extern "C" fn hello_explain_foreign_scan(
     es: *mut pg_sys::ExplainState,
 ) {
     debug1!("HelloFdw: hello_explain_foreign_scan");
-
+    // This function is not needed and could be null ...
     let hello = std::ffi::CString::new("Hello").expect("invalid");
     let hello_explain = std::ffi::CString::new("Hello Explain Value").expect("invalid");
     unsafe { pg_sys::ExplainPropertyText(hello.as_ptr(), hello_explain.as_ptr(), es) }
 }
 
 #[pg_guard]
-unsafe extern "C" fn hello_begin_foreign_scan(
+unsafe extern "C" fn begin_foreign_scan(
     node: *mut pg_sys::ForeignScanState,
     eflags: ::std::os::raw::c_int,
 ) {
@@ -439,7 +460,8 @@ unsafe extern "C" fn hello_begin_foreign_scan(
         return;
     }
 
-    // Get the state correctly
+    // We get the state from the plan and convert it to.
+    // First we can get the scan state. 
     let scan_state = (*node).ss;
     let plan = scan_state.ps.plan as *mut pg_sys::ForeignScan;
     let list = PgList::<pg_sys::Const>::from_pg((*plan).fdw_private );
@@ -448,26 +470,29 @@ unsafe extern "C" fn hello_begin_foreign_scan(
     let mut state:PgBox::<FdwState> = PgBox::from_pg(ptr as _);
     state.rownum = 0;
 
-    // initialize scan result lists
+    // Collect the number of attributes in the table, this is not effected by the select
+    // but the nbr in the actuall table defintion. 
     let rel = scan_state.ss_currentRelation;
     let tup_desc = (*rel).rd_att;
     let natts = (*tup_desc).natts as usize;
-    
     state.natts = natts;
+
+    // Save the state
     (*node).fdw_state = state.into_pg() as *mut std::ffi::c_void;
 }
 
 #[pg_guard]
-unsafe extern "C" fn hello_iterate_foreign_scan(
+unsafe extern "C" fn iterate_foreign_scan(
     node: *mut pg_sys::ForeignScanState,
 ) -> *mut pg_sys::TupleTableSlot {
     let slot = (*node).ss.ss_ScanTupleSlot;
     if let Some(clear) = (*(*slot).tts_ops).clear {
         clear(slot);
     }
-    // let state = (*node).fdw_state as *mut FdwState;
+    // Get the state and PgBox;
     let mut state: PgBox<FdwState> = PgBox::<FdwState>::from_pg((*node).fdw_state as _);
 
+    // Use a memory context, not sure if this is actually needed or not ..
     state.tmp_ctx.reset();
     let mut old_ctx = state.tmp_ctx.set_as_current();
 
@@ -477,7 +502,7 @@ unsafe extern "C" fn hello_iterate_foreign_scan(
     if (*state).rownum == 0 {
         let meta = (*state).metadata.clone().unwrap();
         let filters = &(*state).filters;
-        let data = meta.filter(filters.clone(), &state.cols);
+        let data = meta.fetch_data(filters.clone(), &state.cols);
         let (values, mask) = meta.tuples(&data, (*state).cols.clone(), state.natts);
         (*state).tuples = values;
         (*state).nulls = mask;

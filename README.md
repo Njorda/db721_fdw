@@ -36,7 +36,7 @@ tail -f  ~/.pgx/15.log
 - Add the options stuff now
 - Read the corresponding files
 - Then do the Predicate pushdown
-- Then do the Projection pushdown 
+- Then do the Projection pushdown
 
 ## fdw_private 
 Is used to pass information between the different executions steps. This is where we wills store information such as:

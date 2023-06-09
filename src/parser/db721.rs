@@ -283,13 +283,8 @@ impl Metadata{
     }
 
     pub fn tuples(&self, data: &HashMap<String, Vec<Cell>>, cols: Vec<ColumnMetadada>, natts: usize) -> (Vec<Vec<Cell>>, Vec<Vec<bool>>){
-        // Make tuples of it so we get then in 
-        // we need to make it correct. 
-        // let mut tuples= Vec::new();
-        // 1) Create the vector of the set length
-        // 2) Create a tuple in each position of length==nbr of columns
-        // 3) Populate the values correctly
-        log!("The number of columns are: {}, the number of columns in the schema are: {}", data.len(), cols.len());
+        // Get the length of a attribute(since it should be the same for all) in order to know the length
+        // of the array that will be intialized. 
         let mut length = 0;
         for (_key, val) in data.iter(){
             log!("The lengths of {} is: {}", _key, val.len());
@@ -301,18 +296,15 @@ impl Metadata{
             }
             length = val.len()
         }
-        // I need to have a bitmask here as well...
-        // Fix this current magic 7 to be from software code ...
-        // begin_foreign_scan in wrappers they show how to do this. 
-        // This will be the longest blog post eeeeveeerrr
+        // Initializing the arrays for holding the data and the mask for null values
         let mut out = vec![vec![Cell::Bool(true); natts]; length];
         let mut mask  = vec![vec![true; natts]; length];
-        // This is the issue.
-        // This is the issue.
-        // Continue here, need to know the place of the att nbr
-        // This is key to how it is done
+
+        // Loop over the columns that have been selected
         for col in cols.iter(){
+            // Get the data for the column of interest
             if let Some(val) = data.get(col.name.as_str()){
+                // Add each value to the corresponding tuple at the designated position(based upon the select)
                 for (value_idx, v) in val.iter().enumerate(){
                     // THIS IS NOT CORRECT
                     out[value_idx][col.num-1] = v.clone();
@@ -323,26 +315,21 @@ impl Metadata{
     return (out, mask)
     }
 
-    pub fn filter(&self, filter:HashMap<String, Filter> , cols: &Vec<ColumnMetadada>) -> HashMap<String, Vec<Cell>>{
-
-        // Here we filter out which blocks are of interest
-        // Predicate push down
+    pub fn fetch_data(&self, filter:HashMap<String, Filter> , cols: &Vec<ColumnMetadada>) -> HashMap<String, Vec<Cell>>{
+        // Figure out which blooks can be skipped based upon the filter conditions
         let (skip_blocks, offsets) = self.block_filter(&filter); 
 
-        // Here we start to read the data, 
+        // Open the file from where the data is located
+        // Should be the file set in the options
         let mut f = File::open("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721").unwrap();
-        // Make the vectors here and add to them in the end return the frame with the vectors takeing the ownershipt
-        // seems easier!
 
-        // How to do this
-        // Load all data
-        // For each create the array of bitmaps
-        // Combine the bitmaps
-        // Filter all the data
-        // Pass the data out. 
-
+        // Initialize the output hashmap
         let mut out:HashMap<String, Vec<Cell>> = HashMap::new();
+
+        // Itterate over the metadata of each column, which is read from the header of the file earlier
         for col in cols.iter() {
+
+            // 
             let column_data = self.columns.get(&col.name).unwrap();
 
             let mut vector:Vec<Cell> = Vec::new();
