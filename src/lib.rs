@@ -70,12 +70,12 @@ unsafe fn db721_fdw_handler() -> fdw_handler {
     fdwroutine.GetForeignRelSize = Some(get_foreign_rel_size);
     fdwroutine.GetForeignPaths = Some(get_foreign_paths);
     fdwroutine.GetForeignPlan = Some(get_foreign_plan);
-    fdwroutine.ExplainForeignScan = Some(hello_explain_foreign_scan);
+    fdwroutine.ExplainForeignScan = Some(explain_foreign_scan);
     fdwroutine.BeginForeignScan = Some(begin_foreign_scan);
     fdwroutine.IterateForeignScan = Some(iterate_foreign_scan);
-    fdwroutine.ReScanForeignScan = Some(hello_re_scan_foreign_scan);
-    fdwroutine.EndForeignScan = Some(hello_end_foreign_scan);
-    fdwroutine.AnalyzeForeignTable = Some(hello_analyze_foreign_table);
+    fdwroutine.ReScanForeignScan = Some(re_scan_foreign_scan);
+    fdwroutine.EndForeignScan = Some(end_foreign_scan);
+    fdwroutine.AnalyzeForeignTable = Some(analyze_foreign_table);
 
     fdwroutine
 }
@@ -250,7 +250,6 @@ unsafe extern "C" fn get_foreign_rel_size(
     baserel: *mut pg_sys::RelOptInfo,
     foreigntableid: pg_sys::Oid,
 ) {
-    log!("HelloFdw: hello_get_foreign_rel_size");
 
     (*baserel).rows = 10.0;
     (*baserel).fdw_private = std::ptr::null_mut();
@@ -438,11 +437,10 @@ unsafe extern "C" fn get_foreign_plan(
 }
 
 #[pg_guard]
-extern "C" fn hello_explain_foreign_scan(
+extern "C" fn explain_foreign_scan(
     _node: *mut pg_sys::ForeignScanState,
     es: *mut pg_sys::ExplainState,
 ) {
-    debug1!("HelloFdw: hello_explain_foreign_scan");
     // This function is not needed and could be null ...
     let hello = std::ffi::CString::new("Hello").expect("invalid");
     let hello_explain = std::ffi::CString::new("Hello Explain Value").expect("invalid");
@@ -526,18 +524,16 @@ unsafe extern "C" fn iterate_foreign_scan(
 
 
 
-unsafe extern "C" fn hello_re_scan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
-    debug1!("HelloFdw: hello_re_scan_foreign_scan");
-
+unsafe extern "C" fn re_scan_foreign_scan(node: *mut pg_sys::ForeignScanState) {
     let state = (*node).fdw_state as *mut FdwState;
     (*state).rownum = 0;
 }
 
-extern "C" fn hello_end_foreign_scan(_node: *mut pg_sys::ForeignScanState) {
+extern "C" fn end_foreign_scan(_node: *mut pg_sys::ForeignScanState) {
     debug1!("HelloFdw: hello_end_foreign_scan");
 }
 
-extern "C" fn hello_analyze_foreign_table(
+extern "C" fn analyze_foreign_table(
     _relation: pg_sys::Relation,
     _func: *mut pg_sys::AcquireSampleRowsFunc,
     totalpages: *mut pg_sys::BlockNumber,
@@ -575,18 +571,27 @@ mod tests {
     #[cfg(not(feature = "no-schema-generation"))]
     #[pg_test]
     fn test_selecty() {
-        Spi::run("CREATE FOREIGN DATA WRAPPER hello_fdw HANDLER hello_fdw_handler VALIDATOR hello_fdw_validator").unwrap();
-        Spi::run("CREATE SERVER hello_server FOREIGN DATA WRAPPER hello_fdw").unwrap();
-        Spi::run("CREATE FOREIGN TABLE hello_fdw_table (id text, data text) SERVER hello_server").unwrap();
+        // This is already created, why I dont know though ... 
+        // Spi::run("CREATE EXTENSION db721_fdw").unwrap();
+        Spi::run("CREATE FOREIGN DATA WRAPPER db721_fdw HANDLER db721_fdw_handler VALIDATOR db721_fdw_validator").unwrap();
+        Spi::run("CREATE SERVER db721_server FOREIGN DATA WRAPPER db721_fdw").unwrap();
+        Spi::run("CREATE FOREIGN TABLE db721_fdw_table ( identifier integer, farm_name varchar, weight_model varchar, sex varchar, age_weeks real, weight_g real,notes varchar) SERVER db721_server OPTIONS (filename '/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721', table 'Farm')").unwrap();
 
-        let row = Spi::get_two::<String, String>("SELECT * FROM hello_fdw_table");
-        let exp = Ok((Some("Hello new,World".to_string()), Some("Hello new,World".to_string())));
-
-
+        // Check number of rows
+        let row = Spi::get_one::<i64>("SELECT COUNT(identifier) FROM db721_fdw_table");
+        let exp = Ok(Some(120000));
         assert_eq!(
             row,
             exp
         );
+        // Check filtering 
+
+        // Check selecting subsets of columns
+
+        // Can we check time to see it is faser reducing the disk I/O?
+        // Just to make sure things are as expected
+        // Check both read less columns and check filtering to read less data
+
     }
 }
 

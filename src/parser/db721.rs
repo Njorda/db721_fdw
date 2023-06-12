@@ -1,4 +1,4 @@
-use std::{fs::File, io::{Read, Seek, SeekFrom}, str, ffi::CStr};
+use std::{fs::File, io::{Read, Seek, SeekFrom}, str};
 use std::collections::{HashMap, HashSet};
 use pgrx::pg_sys::{self, Datum, Oid};
 use pgrx::*;
@@ -59,12 +59,14 @@ pub struct Metadata{
 
     pub columns: HashMap<String, Columns>,
 
-    pub start_metadata: i32
+    pub start_metadata: i32,
+
+    pub filename: String
 }
 
 //"/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721"
 pub fn read_metadata(filename: String)-> Metadata {
-    let mut f = File::open(filename).unwrap();
+    let mut f = File::open(filename.clone()).unwrap();
     // Read the last 4 bytes to get the size of the metadata
     f.seek(SeekFrom::End(-4)).unwrap(); // We want the last 4 bytes
     let mut buffer = [0u8; std::mem::size_of::<u32>()]; // could just hard code to 4 as well, but should not matter here at all
@@ -78,7 +80,12 @@ pub fn read_metadata(filename: String)-> Metadata {
     let meta: Db721Metadata =  serde_json::from_slice(&buffer).unwrap();
     let file_length: i32 = f.metadata().unwrap().len().try_into().unwrap();
     let start_metadata =  file_length - i32::from(out)-4;
-    return Metadata { table: meta.table, max_values_per_block: meta.max_values_per_block, columns: meta.columns, start_metadata: start_metadata}
+    return Metadata { table: meta.table
+        , max_values_per_block: meta.max_values_per_block
+        , columns: meta.columns
+        , start_metadata: start_metadata
+        , filename: filename
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -321,7 +328,7 @@ impl Metadata{
 
         // Open the file from where the data is located
         // Should be the file set in the options
-        let mut f = File::open("/Users/niklashansson/OpenSource/postgres/cmudb/extensions/db721_fdw/data-chickens.db721").unwrap();
+        let mut f = File::open(self.filename.clone()).unwrap();
 
         // Initialize the output hashmap
         let mut out:HashMap<String, Vec<Cell>> = HashMap::new();
@@ -329,9 +336,8 @@ impl Metadata{
         // Itterate over the metadata of each column, which is read from the header of the file earlier
         for col in cols.iter() {
 
-            // 
-            let column_data = self.columns.get(&col.name).unwrap();
 
+            let column_data = self.columns.get(&col.name).unwrap();
             let mut vector:Vec<Cell> = Vec::new();
 
             for (block_index, _stats) in column_data.block_stats.iter(){
